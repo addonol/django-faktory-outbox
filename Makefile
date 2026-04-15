@@ -39,5 +39,10 @@ relay:
 	@echo "🚀 Launching relay engine..."
 	uv run python -m faktory_outbox.relay
 
+# Stress Test: Injects a massive batch of jobs (controlled by STRESS_COUNT) to test throughput.
 stress:
 	uv run python examples/django_example/stress_test.py
+
+# Bulk Push PoC: Demonstrates the high-performance PUSHB command from my custom Faktory fork.
+bulk-demo:
+	uv run python examples/django_example/batch_demo.py

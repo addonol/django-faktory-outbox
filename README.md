@@ -54,13 +54,30 @@ The Faktory protocol supports a `PUSHB` command for true atomic bulk delivery of
 
 ## Quick Start
 
+Ensure you have your `.env` file configured before running the commands.
+
 ```bash
-# Start the infrastructure
+# Spin up the PostgreSQL and Faktory containers
 make infra-up
 
-# Run the demo with stylized logs
+# Standard Demo: Validates atomic transactions and rollbacks with stylized logs.
 make demo
 
-# Run the relay engine
+# Stress Test: Injects a massive batch of jobs (controlled by STRESS_COUNT) to test throughput.
+make stress
+
+# Bulk Push PoC: Demonstrates the high-performance PUSHB command from my custom Faktory fork.
+make bulk-demo
+
+# Run the standalone relay to move jobs from the database to Fakto
 make relay
+
+# Follow container logs
+make logs
+
+# Full reset (Clean, Down, and Rebuild)
+make dev-reset
+
+# Remove build artifacts and cache
+make clean
 ```
