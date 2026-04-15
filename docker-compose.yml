@@ -1,0 +1,46 @@
+# WARNING: This file is for DEMONSTRATION and DEVELOPMENT purposes only.
+# DO NOT USE THIS IN PRODUCTION.
+#
+# SECURITY NOTES:
+# 1. Credentials should NEVER be exposed in environment variables in production.
+#    Use a secure Secrets Manager (like AWS Secrets Manager, HashiCorp Vault)
+#    or Docker Secrets.
+# 2. For professional deployments, use specialized automation tools like
+#    Ansible roles and playbooks to manage configurations and secrets securely.
+# 3. Ensure your production database and broker are isolated in a private network.
+
+services:
+  faktory:
+    image: docker.io/contribsys/faktory:latest
+    container_name: faktory
+    ports:
+      - "7419:7419"
+      - "7420:7420"
+    environment:
+      - FAKTORY_PASSWORD=${FAKTORY_PASSWORD}
+
+  pg_db:
+    image: docker.io/postgres:16-alpine
+    container_name: pg_db
+    environment:
+      - POSTGRES_DB=outbox_db
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-demo_password_123}
+    ports:
+      - "5432:5432"
+
+  relay:
+    build: .
+    container_name: relay_worker
+    depends_on:
+      - pg_db
+      - faktory
+    environment:
+      - DATABASE_URL=postgres://user:${DB_PASSWORD:-demo_password_123}@pg_db:5432/outbox_db
+      - FAKTORY_URL=tcp://:${FAKTORY_PASSWORD}@faktory:7419
+      - RELAY_DEBUG=True
+      - RELAY_BATCH_SIZE=1000
+
+networks:
+  outbox_net:
+    driver: bridge
