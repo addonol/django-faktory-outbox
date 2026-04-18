@@ -25,7 +25,6 @@ MANIFEST
 
 # --- UV (Python package manager) ---
 .venv/
-uv.lock
 
 # --- Django ---
 *.log
