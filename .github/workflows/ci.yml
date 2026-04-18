@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    name: Run Linters & Type Checking
+    name: Run Linters
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -27,7 +27,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint code with Ruff
-        run: uv run ruff check .
+        run: uvx ruff check .
 
       - name: Check formatting
-        run: uv run ruff format --check .
+        run: uvx ruff format --check .
