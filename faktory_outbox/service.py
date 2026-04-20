@@ -4,8 +4,10 @@ This module provides the OutboxService class, which handles the creation of
 outbox entries within Django database transactions to ensure atomic delivery.
 """
 
+import json
 from typing import Any, Dict, List, Optional
 
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import QuerySet
 
@@ -41,11 +43,13 @@ class OutboxService:
         payload = {"mode": "custom", "content": data or {}}
 
         if queryset is not None:
+            data_list = list(queryset.values())
+            serialized_data = json.loads(json.dumps(data_list, cls=DjangoJSONEncoder))
             payload.update(
                 {
                     "mode": "orm",
                     "model": str(queryset.model._meta),
-                    "content": list(queryset.values()),
+                    "content": serialized_data,
                 }
             )
         elif raw_sql:

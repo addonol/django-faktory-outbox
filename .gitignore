@@ -45,3 +45,6 @@ examples/example_outbox.sqlite3
 # --- OS ---
 .DS_Store
 Thumbs.db
+
+# --- COVERAGE ---
+.coverage

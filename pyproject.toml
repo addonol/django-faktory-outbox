@@ -27,13 +27,19 @@ dependencies = [
     "faktory",
 ]
 
-[project.optional-dependencies]
-postgres = ["psycopg2-binary>=2.9.11"]
-oracle = ["oracledb>=3.4.2"]
+[dependency-groups]
 dev = [
+    "factory-boy>=3.3.3",
+    "pre-commit>=3.5.0",
     "pytest",
-    "pre-commit",
+    "pytest-django",
+    "pytest-cov",
     "ruff",
+    "pytest-mock>=3.15.1",
+]
+database = [
+    "psycopg2-binary>=2.9.11",
+    "oracledb>=3.4.2"
 ]
 
 [project.scripts]
@@ -41,7 +47,7 @@ clean-outbox = "scripts.cleanup:cleanup"
 
 [project.urls]
 Homepage = "https://github.com/addonol/django-faktory-outbox"
-Repository = "https://github.com/addonol/django-faktory-outbox.git"
+Repository = "https://github.com/addonol/django-faktory-outbox"
 Issues = "https://github.com/addonol/django-faktory-outbox/issues"
 
 [tool.hatch.build.targets.wheel]
@@ -59,8 +65,12 @@ lint.pydocstyle.convention = "google"
 [tool.uv.sources]
 faktory = { git = "https://github.com/addonol/faktory_worker_python", rev = "e5077889405d7202e6232edaf16b9cb0974db1a2" }
 
+[tool.pytest.ini_options]
+addopts = "--cov=faktory_outbox --cov-report=term-missing"
 
-[dependency-groups]
-dev = [
-    "pre-commit>=3.5.0",
-]
+[tool.coverage.run]
+source = ["faktory_outbox"]
+relative_files = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]
