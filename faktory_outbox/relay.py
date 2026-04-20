@@ -242,31 +242,46 @@ class OutboxRelay:
     def mask_url_password(self, url: str) -> str:
         """Removes the password from a connection URL for safe logging.
 
-        This utility parses a connection string (e.g., PostgreSQL or Faktory URLs)
-        and replaces the sensitive password part with asterisks to prevent
-        accidental exposure in system logs.
-
         Args:
-            url: The full connection string containing potential credentials.
+            url: The full connection string.
 
         Returns:
-            The masked URL string with the password replaced by '****'.
-            If no password is found, the original URL is returned.
-            If parsing fails, returns '***' as a safety fallback.
+            The masked URL string or '***' on failure.
         """
         try:
+            if not isinstance(url, str):
+                raise ValueError("URL must be a string")
+
             parsed = urlparse.urlparse(url)
             if not parsed.password:
                 return url
+
             netloc = f"{parsed.username}:****@{parsed.hostname}"
             if parsed.port:
                 netloc += f":{parsed.port}"
+
             return parsed._replace(netloc=netloc).geturl()
         except Exception:
             return "***"
 
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for the Outbox Relay CLI.
+
+    Initializes logging, establishes a connection to the database (PostgreSQL or Oracle)
+    based on environment variables, and starts the relay loop to synchronize
+    the database outbox with the Faktory server.
+
+    Environment Variables:
+        DATABASE_URL (str): The connection string for the database (Required).
+        FAKTORY_URL (str): The connection string for Faktory (Default: tcp://localhost:7419).
+        RELAY_DEBUG (bool): Enables debug logging if set to 'true'.
+        RELAY_BATCH_SIZE (int): Number of jobs to process per batch (Default: 50).
+
+    Raises:
+        SystemExit: If DATABASE_URL is missing, DB connection fails, or a critical
+            error occurs during execution.
+    """
     DEBUG_MODE = os.getenv("RELAY_DEBUG", "false").lower() == "true"
     LOG_LEVEL = logging.DEBUG if DEBUG_MODE else logging.INFO
 
@@ -321,18 +336,31 @@ if __name__ == "__main__":
     try:
         relay = OutboxRelay(connection=conn, dialect=dialect, faktory_url=faktory_url)
         safe_faktory_url = relay.mask_url_password(faktory_url)
-        logger.info("🚀 Relay loop active (Batch size: %d)", env_batch_size)
-        relay.run_loop(min_sleep=2, max_sleep=60, batch_size=env_batch_size)
+        logger.info(
+            "🚀 Relay loop active (Batch size: %d, Server: %s)",
+            env_batch_size,
+            safe_faktory_url,
+        )
+
+        relay.run_loop(min_sleep=2.0, max_sleep=60.0, batch_size=env_batch_size)
 
     except KeyboardInterrupt:
         logger.info("")
         logger.info("🛑 Shutdown requested by user...")
+    except SystemExit:
+        raise
     except Exception as exc:
         logger.critical("❌ Relay engine crashed: %s", exc)
         sys.exit(1)
+        return
     finally:
-        if "conn":
+        if conn is not None:
             conn.close()
             logger.info("🔌 Database connection closed.")
         logger.info("👋 Relay stopped gracefully. Goodbye!")
-        sys.exit(0)
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
