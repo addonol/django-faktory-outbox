@@ -81,3 +81,77 @@ make dev-reset
 # Remove build artifacts and cache
 make clean
 ```
+
+
+## Integration
+
+### 1. Atomic Job Registration (Django)
+Use `OutboxService` within a Django atomic transaction to ensure that background jobs are only registered if your database changes are successfully committed.
+
+```python
+from django.db import transaction
+from faktory_outbox.service import OutboxService
+
+with transaction.atomic():
+    # Your business logic (e.g., creating an order)
+    order = Order.objects.create(amount=100)
+
+    # Register the associated background job
+    OutboxService.push_atomic(
+        task_name="ProcessPayment",
+        data={"order_id": order.id}
+    )
+    # If the code crashes here, both the order and the job are rolled back.
+```
+
+### 2. Flexible Payload Modes
+The service supports three extraction modes to fit any architectural requirement:
+
+```python
+from faktory_outbox.service import OutboxService
+from django.contrib.auth.models import User
+
+# --- 1. Custom Data Mode ---
+# Best for simple, manual payloads.
+OutboxService.push_atomic(
+    task_name="SendNotification",
+    data={"user_id": 42, "message": "Hello World"}
+)
+
+# --- 2. Django QuerySet Mode ---
+# Automatically extracts and serializes records into a list of dictionaries.
+# Handles Django-specific types like Datetime and UUID.
+active_users = User.objects.filter(is_active=True)
+OutboxService.push_atomic(
+    task_name="SyncUsers",
+    queryset=active_users
+)
+
+# --- 3. Raw SQL Mode ---
+# Best for high-performance extraction of complex data.
+# Stores the query and params to be executed later by the worker.
+raw_query = "SELECT id, email FROM auth_user WHERE date_joined > %s"
+query_params = ["2026-01-01"]
+OutboxService.push_atomic(
+    task_name="ExportAuditLog",
+    raw_sql=raw_query,
+    params=query_params
+)
+```
+
+### 3. Reliable Synchronization via Relay
+The Relay is a standalone engine (CLI) that moves jobs from your database to the Faktory server. It is designed for production resilience and natively handles:
+
+*   **High Concurrency**: Uses `FOR UPDATE SKIP LOCKED` (Postgres/Oracle) to allow multiple relay instances to run in parallel without job duplication or locking issues.
+*   **Resilience**: Features an automatic exponential backoff strategy if either the Faktory server or the database becomes unavailable.
+*   **Security**: Automatically masks connection passwords in system logs to prevent accidental credential leakage.
+
+To start the relay, configure your environment variables and run the module:
+
+```bash
+# Configuration
+export DATABASE_URL="postgres://user:pass@localhost:5432/db"
+export FAKTORY_URL="tcp://:password@localhost:7419"
+
+# Execution
+python -m faktory_outbox.relay
