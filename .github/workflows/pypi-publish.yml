@@ -1,0 +1,33 @@
+name: CD - Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Build and Publish Package
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: pypi
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Compile Package Archives
+        run: uv build
+
+      - name: Publish to PyPI via Trusted Publishers
+        uses: pypa/gh-action-pypi-publish@release/v1
