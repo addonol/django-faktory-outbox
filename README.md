@@ -102,6 +102,28 @@ OutboxService.push_atomic(
 )
 ```
 
+### 3. Automated Database Maintenance (Pruning)
+
+As tasks are successfully processed by the relay daemon, historical logs accumulate in the faktory_outbox table. To prevent unlimited database storage growth and maintain optimal index execution speeds, the package provides a native Django administrative management command.
+
+You can run this command manually or hook it to a periodic orchestrator (e.g., Unix Cron, Kubernetes CronJob, or Django Celery Beat):
+
+```bash
+# Safely deletes processed entries older than 14 days (Default configuration)
+python manage.py clear_processed_outbox
+
+# Customize the retention window threshold to 7 days
+python manage.py clear_processed_outbox --days=7
+
+# Force removal of both safely processed records AND old quarantined DLQ failures
+python manage.py clear_processed_outbox --days=30 --include-failed
+```
+
+Operational safety is built-in:
+*   The execution strictly targets records where `processed=True`. Active or pending job queues are completely untouched.
+*   Quarantined dead-lettered failures (`is_failed=True`) are highly valuable for debugging and are never removed unless you explicitly pass the `--include-failed` flag.
+
+
 ## Local Development & Demonstration Toolkit
 
 For development, testing, and evaluation purposes, this repository includes a complete multi-container orchestration stack. The environment is assembled using a locally built non-root image and a pre-configured docker-compose.yml file to spin up 4 operational containers, each serving a precise architectural role:
