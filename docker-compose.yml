@@ -1,45 +1,75 @@
-# WARNING: This file is for DEMONSTRATION and DEVELOPMENT purposes only.
-# DO NOT USE THIS IN PRODUCTION.
+# WARNING: This configuration file is for DEVELOPMENT and DEMONSTRATION only.
+# Implements a 4-container production-like topology with generic nomenclature.
 #
 # SECURITY NOTES:
 # 1. Credentials should NEVER be exposed in environment variables in production.
 #    Use a secure Secrets Manager (like AWS Secrets Manager, HashiCorp Vault)
-#    or Docker Secrets.
+#    or Docker/Podman Secrets.
 # 2. For professional deployments, use specialized automation tools like
 #    Ansible roles and playbooks to manage configurations and secrets securely.
 # 3. Ensure your production database and broker are isolated in a private network.
 
 services:
-  faktory:
+  message_broker:
     image: docker.io/contribsys/faktory:latest
-    container_name: faktory
+    container_name: message_broker
     ports:
       - "7419:7419"
       - "7420:7420"
     environment:
       - FAKTORY_PASSWORD=${FAKTORY_PASSWORD}
+    networks:
+      - outbox_net
 
-  pg_db:
+  database:
     image: docker.io/postgres:16-alpine
-    container_name: pg_db
+    container_name: database
     environment:
-      - POSTGRES_DB=outbox_db
-      - POSTGRES_USER=user
+      - POSTGRES_DB=${DB_NAME:-outbox_db}
+      - POSTGRES_USER=${DB_USER:-user}
       - POSTGRES_PASSWORD=${DB_PASSWORD:-demo_password_123}
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-user} -d ${DB_NAME:-outbox_db}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+    networks:
+      - outbox_net
+
+  django_app:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: localhost/faktory-outbox-relay:latest
+    container_name: django_application
+    depends_on:
+      - database
+    environment:
+      - DATABASE_URL=postgres://${DB_USER:-user}:${DB_PASSWORD:-demo_password_123}@database:5432/${DB_NAME:-outbox_db}
+    command: ["python", "-u", "examples/django_example/demo.py"]
+    networks:
+      - outbox_net
 
   relay:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: localhost/faktory-outbox-relay:latest
     container_name: relay_worker
     depends_on:
-      - pg_db
-      - faktory
+      - database
+      - message_broker
+      - django_app
     environment:
-      - DATABASE_URL=postgres://user:${DB_PASSWORD:-demo_password_123}@pg_db:5432/outbox_db
-      - FAKTORY_URL=tcp://:${FAKTORY_PASSWORD}@faktory:7419
-      - RELAY_DEBUG=True
-      - RELAY_BATCH_SIZE=1000
+      - DATABASE_URL=postgres://${DB_USER:-user}:${DB_PASSWORD:-demo_password_123}@database:5432/${DB_NAME:-outbox_db}
+      - FAKTORY_URL=tcp://:${FAKTORY_PASSWORD}@message_broker:7419
+      - RELAY_DEBUG=${RELAY_DEBUG:-True}
+      - RELAY_BATCH_SIZE=${RELAY_BATCH_SIZE:-50}
+    command: python -m faktory_outbox.relay
+    networks:
+      - outbox_net
 
 networks:
   outbox_net:
