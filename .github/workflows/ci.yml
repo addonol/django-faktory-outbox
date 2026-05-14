@@ -18,16 +18,32 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python
         run: uv python install
-
-      - name: Install Dependencies
-        run: uv sync --frozen
 
       - name: Lint code with Ruff
         run: uvx ruff check .
 
       - name: Check formatting
         run: uvx ruff format --check .
+
+  test:
+    name: Run Test Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Run Package Suite with Coverage
+        run: uv run pytest --cov=faktory_outbox --cov-report=term-missing --cov-fail-under=95
