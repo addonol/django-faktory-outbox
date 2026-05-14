@@ -1,59 +1,103 @@
-"""Service layer for the Faktory Outbox library.
+"""Service layer for the Faktory Outbox engine.
 
-This module provides the OutboxService class, which handles the creation of
-outbox entries within Django database transactions to ensure atomic delivery.
+This module exposes the operational service API required to stage
+background tasks atomically alongside core application database
+changes.
 """
 
-import json
 from typing import Any, Dict, List, Optional
 
-from django.core.serializers.json import DjangoJSONEncoder
-from django.db import transaction
+from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db.models import QuerySet
 
 from .models import FaktoryOutbox
 
 
+class OutboxTransactionError(Exception):
+    """Raised when outbox registration fails.
+
+    The registration was attempted outside an active database
+    transaction context block.
+    """
+
+    pass
+
+
 class OutboxService:
-    """Service layer for atomic job registration."""
+    """Service layer providing transactional job isolation mechanics."""
 
     @staticmethod
     def push_atomic(
         task_name: str,
         queryset: Optional[QuerySet] = None,
         raw_sql: Optional[str] = None,
-        params: Optional[List[Any]] = None,
-        data: Optional[Dict[str, Any]] = None,
+        sql_parameters: Optional[List[Any]] = None,
+        custom_payload: Optional[Dict[str, Any]] = None,
+        database_alias: str = DEFAULT_DB_ALIAS,
     ) -> FaktoryOutbox:
-        """Registers a job within the current Django database transaction.
+        """Registers a background task inside the active transaction.
+
+        Guarantees that the background job metadata is written to the
+        outbox database buffer only if the outer application
+        transaction succeeds. If a database rollback occurs, the
+        background job submission is undone.
 
         Args:
-            task_name (str): The target task name in the Faktory worker.
-            queryset (QuerySet, optional): Django QuerySet to extract data from.
-            raw_sql (str, optional): Raw SQL query string for complex extractions.
-            params (list, optional): Parameters for the raw SQL query.
-            data (dict, optional): Custom dictionary for manual payloads.
+            task_name (str): The identifier of the destination task
+                configured on the Faktory worker instances.
+            queryset (QuerySet, optional): A lazy Django QuerySet.
+                Records are extracted using database cursors to
+                preserve a low application memory footprint.
+            raw_sql (str, optional): A raw SQL command string used
+                for high-performance complex database extractions.
+            sql_parameters (List[Any], optional): Parameters matching
+                positional placeholders within the `raw_sql` string.
+            custom_payload (Dict[str, Any], optional): A standard
+                dictionary containing pre-computed variables.
+            database_alias (str): The configuration routing alias
+                targeting a specific database engine.
 
         Returns:
-            FaktoryOutbox: The created outbox record instance.
+            FaktoryOutbox: The newly written persistent outbox record.
 
         Raises:
-            Exception: If data extraction or database insertion fails.
+            OutboxTransactionError: If invoked while auto-commit is
+                active or outside a valid transaction context.
         """
-        payload = {"mode": "custom", "content": data or {}}
+        db_connection = transaction.get_connection(database_alias)
+
+        if not db_connection.in_atomic_block:
+            raise OutboxTransactionError(
+                f"The method 'push_atomic' must be executed within "
+                f"an active transaction.atomic() context block for "
+                f"database: '{database_alias}'."
+            )
+
+        # Default fallback initialization using custom data mode
+        serialized_payload = {
+            "mode": "custom",
+            "content": custom_payload or {},
+        }
 
         if queryset is not None:
-            data_list = list(queryset.values())
-            serialized_data = json.loads(json.dumps(data_list, cls=DjangoJSONEncoder))
-            payload.update(
+            # Memory optimization: streaming data chunks via cursors
+            # prevents loading the entire queryset into RAM.
+            queryset_iterator = queryset.values().iterator(chunk_size=1000)
+            serialized_payload.update(
                 {
                     "mode": "orm",
-                    "model": str(queryset.model._meta),
-                    "content": serialized_data,
+                    "model_identifier": str(queryset.model._meta),
+                    "content": list(queryset_iterator),
                 }
             )
         elif raw_sql:
-            payload.update({"mode": "sql", "query": raw_sql, "params": params or []})
-
-        with transaction.atomic():
-            return FaktoryOutbox.objects.create(task_name=task_name, payload=payload)
+            serialized_payload.update(
+                {
+                    "mode": "sql",
+                    "query_string": raw_sql,
+                    "parameters": sql_parameters or [],
+                }
+            )
+        return FaktoryOutbox.objects.using(database_alias).create(
+            task_name=task_name, payload=serialized_payload
+        )

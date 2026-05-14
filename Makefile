@@ -1,48 +1,88 @@
-include .env
+include .env.example
 export
 
 # Dynamic URL Construction
 export DATABASE_URL=postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 export FAKTORY_URL=tcp://:$(FAKTORY_PASSWORD)@$(FAKTORY_HOST):7419
 
-.PHONY: clean infra-up infra-down relay-restart logs dev-reset demo relay
+.PHONY: help clean infra-up infra-down relay-restart logs dev-reset demo relay stress bulk-demo make-migrations run-example
 
-# Remove build artifacts and cache files
+# ==============================================================================
+# HELP MENU (DEFAULT TARGET)
+# ==============================================================================
+
+help:
+	@echo "========================================================================"
+	@echo "                    DJANGO FAKTORY OUTBOX - CLI TOOLBOARD               "
+	@echo "========================================================================"
+	@echo "Usage: make [target]"
+	@echo ""
+	@echo "Development & Local Testing:"
+	@echo "  make make-migrations  Generate Django outbox package migrations isolated"
+	@echo "  make run-example      Execute the local memory-safe integration test"
+	@echo "  make clean            Remove build artifacts, caches, and pyc files"
+	@echo ""
+	@echo "Infrastructure Management (Podman):"
+	@echo "  make infra-up         Start the 4-container demonstration infrastructure"
+	@echo "  make infra-down       Stop and remove infrastructure containers & networks"
+	@echo "  make relay-restart    Rebuild the relay image and restart its container"
+	@echo "  make logs             Follow infrastructure containers logs stream"
+	@echo "  make dev-reset        Full reset (Clean cache, Stop stack, Rebuild & Start)"
+	@echo ""
+	@echo "Container Stream Monitoring:"
+	@echo "  make demo             Follow the live Django invoice generation loop logs"
+	@echo "  make relay            Follow the active outbox relay sync daemon logs"
+	@echo "========================================================================"
+
+
+# ==============================================================================
+# DEVELOPMENT & MIGRATIONS TARGETS
+# ==============================================================================
+
+make-migrations:
+	@echo "Generating isolated Django schema migrations..."
+	uv run python utils/make_migrations.py
+
+run-example:
+	@echo "Executing local programmatic integration test sequence..."
+	uv run python examples/run_example.py
+
 clean:
-	uv run python scripts/cleanup.py
+	@echo "Cleaning up compilation cache artifacts..."
+	uv run python utils/clean_cached_files.py
 
-# Start the demonstration infrastructure
+# ==============================================================================
+# INFRASTRUCTURE MANAGEMENT TARGETS
+# ==============================================================================
+
 infra-up:
 	podman-compose up -d
 
-# Stop and remove infrastructure containers
 infra-down:
 	podman-compose down
 
-# Rebuild and restart the relay worker container
 relay-restart:
+	@echo "Rebuilding the local relay image..."
+	podman build -t localhost/faktory-outbox-relay:latest .
+	@echo "Restarting the relay service container..."
 	podman-compose up -d --build relay
 
-# Follow infrastructure logs
 logs:
 	podman-compose logs -f
 
-# Perform a full cleanup and restart the relay service
-dev-reset: clean infra-down relay-restart
+dev-reset: clean infra-down
+	@echo "Performing explicit local image build for Podman compliance..."
+	podman build -t localhost/faktory-outbox-relay:latest .
+	@echo "Launching full infrastructure stack..."
+	podman-compose up -d
 
-# Run the Django demonstration
+# ==============================================================================
+# EXECUTION & BENCHMARKING TARGETS
+# ==============================================================================
+
 demo:
 	uv run python examples/django_example/demo.py
 
-# Run the standalone relay engine
 relay:
-	@echo "🚀 Launching relay engine..."
+	@echo "Launching outbox relay synchronization daemon..."
 	uv run python -m faktory_outbox.relay
-
-# Stress Test: Injects a massive batch of jobs (controlled by STRESS_COUNT) to test throughput.
-stress:
-	uv run python examples/django_example/stress_test.py
-
-# Bulk Push PoC: Demonstrates the high-performance PUSHB command from my custom Faktory fork.
-bulk-demo:
-	uv run python examples/django_example/batch_demo.py

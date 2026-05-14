@@ -1,44 +1,65 @@
-"""Database models for the Faktory Outbox library.
+"""Database models for the Faktory Outbox engine.
 
-This module defines the FaktoryOutbox model, which serves as a persistent
-buffer to ensure atomic job queuing in distributed systems.
+This module defines the persistent database schema required to buffer
+background tasks securely before they are relayed to the Faktory
+server.
 """
 
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 
 
 class FaktoryOutbox(models.Model):
-    """Stores jobs persistently to guarantee atomicity during database operations.
+    """Stores job metadata within transactional database boundaries.
 
-    This model acts as a buffer. Jobs are committed here within the same
-    transaction as business data, ensuring that if a database rollback occurs,
-    the job is also rolled back.
-
-    Attributes:
-        task_name (str): The name of the worker task to be executed.
-        payload (dict): JSON data containing job arguments or query details.
-        created_at (datetime): Automated timestamp of creation.
-        processed (bool): Status flag indicating if the job was sent to Faktory.
+    This model acts as a reliable FIFO queue buffer. Records are
+    written within the same transaction as operational data,
+    ensuring that if a database rollback occurs, the background job is
+    also discarded.
     """
 
     task_name = models.CharField(max_length=255)
-    payload = models.JSONField()
+
+    # DjangoJSONEncoder is mandatory to support UUID, Decimal and
+    # DateTime types stored from the OutboxService.
+    payload = models.JSONField(encoder=DjangoJSONEncoder)
+
     created_at = models.DateTimeField(auto_now_add=True)
-    processed = models.BooleanField(default=False, db_index=True)
+    processed = models.BooleanField(default=False)
+
+    delivery_attempts = models.PositiveIntegerField(
+        default=0,
+        help_text="The total number of delivery attempts to Faktory.",
+    )
+    last_execution_error = models.TextField(
+        blank=True,
+        null=True,
+        help_text="The system exception trace log of the last failure.",
+    )
+    is_failed = models.BooleanField(
+        default=False,
+        help_text="Flagged as true if delivery attempts breach limits.",
+    )
 
     class Meta:
-        """Metadata options for the FaktoryOutbox model.
-
-        Defines the database table name, default ordering, and optimized
-        indexes for the relay engine performance.
-        """
+        """Metadata options for the FaktoryOutbox model."""
 
         db_table = "faktory_outbox"
         ordering = ["created_at"]
         indexes = [
-            models.Index(fields=["processed", "created_at"]),
+            models.Index(
+                fields=["created_at"],
+                name="idx_outbox_pending_relay",
+                condition=models.Q(processed=False, is_failed=False),
+            ),
         ]
 
     def __str__(self) -> str:
         """Returns a string representation of the job status."""
-        return f"{self.task_name} ({'Processed' if self.processed else 'Pending'})"
+        if self.processed:
+            status_label = "Processed"
+        elif self.is_failed:
+            status_label = "Failed (DLQ)"
+        else:
+            status_label = f"Pending (Attempt {self.delivery_attempts})"
+        return f"{self.task_name} - {status_label}"

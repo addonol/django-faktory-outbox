@@ -1,17 +1,63 @@
-"""Demonstration script for the Faktory Outbox pattern.
+"""Demonstration script simulating an operational invoicing outbox workflow.
 
-This script executes a visual walkthrough of atomic transactions,
-demonstrating how the library guarantees data consistency even during crashes.
+This standalone utility boots an isolated Django environment, ensures
+database schemas are initialized, and triggers atomic registration
+examples simulating transactional invoicing operations.
 """
 
 import logging
 import os
 import sys
 import time
+from urllib.parse import urlparse
 
 import django
+from django.conf import settings
 from django.core.management import call_command
-from django.db import transaction
+from django.db import DEFAULT_DB_ALIAS, transaction
+from django.utils import timezone
+
+DATABASE_CONNECTION_URL = os.getenv(
+    "DATABASE_URL", "postgres://user:demo_password_123@database:5432/outbox_db"
+)
+
+parsed_url = urlparse(DATABASE_CONNECTION_URL)
+database_port = parsed_url.port if parsed_url.port else 5432
+database_name = parsed_url.path.lstrip("/")
+
+settings.configure(
+    INSTALLED_APPS=[
+        "django.contrib.contenttypes",
+        "django.contrib.admin",
+        "django.contrib.auth",
+        "faktory_outbox",
+    ],
+    DATABASES={
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": database_name,
+            "USER": parsed_url.username,
+            "PASSWORD": parsed_url.password,
+            "HOST": parsed_url.hostname,
+            "PORT": str(database_port),
+        }
+    },
+    LOGGING={
+        "version": 1,
+        "disable_existing_loggers": False,
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+            },
+        },
+        "root": {
+            "handlers": ["console"],
+            "level": "INFO",
+        },
+    },
+)
+
+django.setup()
 
 logging.Formatter.converter = time.localtime
 logging.basicConfig(
@@ -19,101 +65,95 @@ logging.basicConfig(
     format="%(asctime)s │ %(levelname)-8s │ %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("outbox_demo")
+
+logger = logging.getLogger("faktory_outbox.demo")
 
 
-def log_separator() -> None:
-    """Prints a subtle horizontal separator line."""
-    logger.info("─" * 70)
+def run_production_demo_pipeline() -> None:
+    """Executes atomic outbox invoice job injection simulation patterns."""
+    if "--only-migrate" in sys.argv:
+        logger.info("Initializing package database schemas...")
+        call_command("migrate", verbosity=0)
+        logger.info("Schema migrations applied successfully.")
+        return
 
+    logger.info("Starting continuous invoice creation factory simulation...")
 
-def log_header(title: str) -> None:
-    """Prints a section header for the demonstration steps.
+    system_user, _ = User.objects.get_or_create(
+        username="system_invoice", defaults={"email": "system@example.com"}
+    )
 
-    Args:
-        title: The text to display as the section title.
-    """
-    logger.info("")
-    logger.info("◈ %s", title.upper())
-    log_separator()
+    try:
+        while True:
+            try:
+                with transaction.atomic(using=DEFAULT_DB_ALIAS):
+                    unique_timestamp = int(time.time() * 1000)
+                    dummy_content_type = ContentType.objects.get_for_model(ContentType)
 
+                    invoice_amount = unique_timestamp % 5000
+                    message_template = (
+                        f"Invoice generated for Amount: ${invoice_amount}.00"
+                    )
 
-def run_demo() -> None:
-    """Executes the outbox demonstration scenarios with visual feedback.
+                    mock_invoice: LogEntry = LogEntry.objects.create(
+                        action_time=timezone.now(),
+                        object_id=str(unique_timestamp),
+                        object_repr=f"INV-{unique_timestamp}",
+                        action_flag=1,
+                        change_message=message_template,
+                        content_type=dummy_content_type,
+                        user=system_user,
+                    )
 
-    Scenario 1: Verifies atomic rollback when an exception occurs.
-    Scenario 2: Verifies successful commitment when logic finishes correctly.
-    """
-    from demo_app.models import LegacyRecord
+                    invoice_queryset = LogEntry.objects.filter(pk=mock_invoice.pk)
+                    OutboxService.push_atomic(
+                        task_name="ProcessGeneratedInvoice",
+                        queryset=invoice_queryset,
+                        database_alias=DEFAULT_DB_ALIAS,
+                    )
 
-    from faktory_outbox.models import FaktoryOutbox
-    from faktory_outbox.service import OutboxService
+                    customer_notification_parameters = {
+                        "invoice_reference": f"INV-{unique_timestamp}",
+                        "customer_email": f"client_{unique_timestamp}@env.com",
+                        "trigger_pdf_generation": True,
+                    }
+                    OutboxService.push_atomic(
+                        task_name="SendInvoiceEmailNotification",
+                        custom_payload=customer_notification_parameters,
+                        database_alias=DEFAULT_DB_ALIAS,
+                    )
 
-    log_header("🚀 Starting Django Faktory Outbox Demo")
-    time.sleep(0.5)
+                    logger.info(
+                        "Buffered transactional invoice tasks for reference: %s",
+                        mock_invoice.object_repr,
+                    )
 
-    log_header("1. Scenario: Atomic Rollback on Crash")
-    logger.info("Target:  Guarantee that no job is queued if processing fails.")
+                time.sleep(5.0)
 
-    with transaction.atomic():
-        try:
-            LegacyRecord.objects.create(external_id=101, data_payload="Ghost Data")
-            OutboxService.push_atomic("process_data", data={"id": 101})
-            logger.info("Action:  Data staged in transaction. Triggering crash...")
+            except Exception as operational_error:
+                logger.error(
+                    "Invoicing simulation cycle failed: %s", str(operational_error)
+                )
+                time.sleep(5.0)
 
-            raise ValueError("Simulated Processing Exception")
+    except KeyboardInterrupt:
+        logger.info("")
+        logger.info("🛑 Shutdown requested by user...")
+    finally:
+        from django.db import connections
 
-        except ValueError as exc:
-            transaction.set_rollback(True)
-            logger.warning("Status:  %s caught. Rolling back...", exc)
+        if "default" in connections:
+            connections["default"].close()
+            logger.info("🔌 Database connection closed.")
 
-    record_exists = LegacyRecord.objects.filter(external_id=101).exists()
-    job_exists = FaktoryOutbox.objects.filter(task_name="process_data").exists()
-
-    if not record_exists and not job_exists:
-        logger.info("Result:  🛡️  Success. Database remains clean.")
-    else:
-        logger.error("Result:  ❌ Failure. Atomicity was breached.")
-
-    time.sleep(0.8)
-
-    log_header("2. Scenario: Successful Transaction")
-    logger.info("Target:  Confirm that jobs are persisted when logic succeeds.")
-
-    with transaction.atomic():
-        LegacyRecord.objects.create(external_id=202, data_payload="Valid Data")
-        OutboxService.push_atomic("process_data", data={"id": 202})
-        logger.info("Action:  Committing business data and job simultaneously...")
-
-    final_count = FaktoryOutbox.objects.count()
-    logger.info("Result:  💎 Success. Total jobs in outbox: %d", final_count)
-
-    logger.info("")
-    log_separator()
-    logger.info("🏁 DEMO COMPLETE - Check Relay logs for transmission status")
-    logger.info("Faktory UI: http://localhost:7420")
-    log_separator()
-    logger.info("")
+        logger.info("👋 Application stopped gracefully. Goodbye!")
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "project.settings")
-    django.setup()
+    from django.contrib.admin.models import LogEntry
+    from django.contrib.auth.models import User
+    from django.contrib.contenttypes.models import ContentType
 
-    from django.db import connection
+    from faktory_outbox.service import OutboxService
 
-    print(f"DEBUG: Django is using database: {connection.settings_dict['NAME']}")
-    print(f"DEBUG: Engine: {connection.settings_dict['ENGINE']}")
-    print(f"DEBUG: Host: {connection.settings_dict.get('HOST', 'N/A')}")
-
-    if "--only-migrate" in sys.argv:
-        from django.db import connections
-
-        logger.info("🔧 Preparing database: Running migrations...")
-        call_command("migrate", verbosity=0)
-
-        for conn in connections.all():
-            conn.close()
-        sys.exit(0)
-
-    run_demo()
+    run_production_demo_pipeline()

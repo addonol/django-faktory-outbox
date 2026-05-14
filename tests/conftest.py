@@ -4,7 +4,9 @@ Initializes the Django environment and defines pure pytest fixtures
 using the mocker plugin to avoid direct unittest imports.
 """
 
+import os
 import secrets
+from typing import Any
 
 import django
 import pytest
@@ -17,6 +19,9 @@ def pytest_configure() -> None:
     Sets up in-memory SQLite and essential contrib apps with a
     randomly generated SECRET_KEY.
     """
+    if "DATABASE_URL" in os.environ:
+        del os.environ["DATABASE_URL"]
+
     if not settings.configured:
         settings.configure(
             DATABASES={
@@ -37,7 +42,7 @@ def pytest_configure() -> None:
 
 
 @pytest.fixture
-def mock_db_conn(mocker):
+def mock_db_conn(mocker: Any) -> Any:
     """Provides a mocked database connection using mocker.
 
     Uses mocker.Mock() to stay within the pytest ecosystem.
@@ -49,6 +54,6 @@ def mock_db_conn(mocker):
 
 
 @pytest.fixture
-def mock_faktory(mocker):
+def mock_faktory(mocker: Any) -> Any:
     """Provides a mocked Faktory client instance for network isolation."""
     return mocker.MagicMock()

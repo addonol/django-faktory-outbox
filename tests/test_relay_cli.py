@@ -67,7 +67,7 @@ def test_should_retry_connection_before_succeeding(
     mocker.patch.dict(os.environ, {"DATABASE_URL": POSTGRES_URL})
 
     mock_conn = mocker.Mock()
-    # Fails once, succeeds on second attempt
+
     mocker.patch(
         "psycopg2.connect", side_effect=[Exception("Connection Pending"), mock_conn]
     )
@@ -88,7 +88,6 @@ def test_should_close_connection_on_critical_crash(
     mocker.patch("psycopg2.connect", return_value=mock_conn)
     mocker.patch.dict(os.environ, {"DATABASE_URL": POSTGRES_URL})
 
-    # Simulate a crash right after the relay starts
     mocker.patch(
         "faktory_outbox.relay.OutboxRelay", side_effect=Exception("Engine Failure")
     )

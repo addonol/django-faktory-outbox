@@ -1,8 +1,8 @@
-"""Relay engine to synchronize the database outbox with a Faktory server.
+"""Relay engine to synchronize the database outbox with Faktory.
 
-This module provides the infrastructure to fetch pending jobs from various
-database dialects (PostgreSQL, Oracle) and push them reliably to Faktory
-using an exponential backoff strategy in case of service downtime.
+This module provides the core processing loop and database dialect
+strategies required to fetch locked pending jobs and forward them
+reliably over TCP to a Faktory server.
 """
 
 import json
@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 import urllib.parse as urlparse
 from typing import Any, List, Protocol, Union
 
@@ -35,17 +36,17 @@ class ConnectionProtocol(Protocol):
 
 
 class DBDialect:
-    """Abstract interface for database-specific SQL syntax and behavior."""
+    """Abstract interface for database-specific SQL syntax."""
 
     @staticmethod
     def get_pending_query(batch_size: int) -> str:
         """Generates the SQL query to fetch pending jobs.
 
         Args:
-            batch_size: Maximum number of records to retrieve.
+            batch_size (int): Maximum number of records to retrieve.
 
         Returns:
-            A database-specific SELECT SQL string.
+            str: A database-specific SELECT SQL string.
 
         Raises:
             NotImplementedError: If the method is not overridden.
@@ -57,10 +58,10 @@ class DBDialect:
         """Converts Python boolean to database-specific format.
 
         Args:
-            value: The boolean value to convert.
+            value (bool): The boolean value to convert.
 
         Returns:
-            The equivalent value for the database engine.
+            Union[bool, int]: The equivalent value for the database.
         """
         return value
 
@@ -68,17 +69,17 @@ class DBDialect:
 class SqliteDialect(DBDialect):
     """SQLite implementation of the outbox dialect for local testing.
 
-    Note: SQLite does not support 'FOR UPDATE SKIP LOCKED'. This dialect
-    is intended for single-relay development environments.
+    Note: SQLite does not support 'FOR UPDATE SKIP LOCKED'. This
+    dialect is intended for single-relay development environments.
     """
 
     @staticmethod
     def get_pending_query(batch_size: int) -> str:
-        """Returns SQLite compatible query without locking clauses."""
+        """Returns SQLite compatible query matching the partial index."""
         return (
             "SELECT id, task_name, payload FROM faktory_outbox "
-            "WHERE processed = 0 ORDER BY created_at ASC "
-            "LIMIT %s"
+            "WHERE processed = 0 AND is_failed = 0 "
+            "ORDER BY created_at ASC LIMIT ?"
         )
 
     @staticmethod
@@ -95,8 +96,8 @@ class PostgresDialect(DBDialect):
         """Returns PostgreSQL query with SKIP LOCKED support."""
         return (
             "SELECT id, task_name, payload FROM faktory_outbox "
-            "WHERE processed = FALSE ORDER BY created_at ASC "
-            "LIMIT %s FOR UPDATE SKIP LOCKED"
+            "WHERE processed = FALSE AND is_failed = FALSE "
+            "ORDER BY created_at ASC LIMIT %s FOR UPDATE SKIP LOCKED"
         )
 
 
@@ -105,11 +106,12 @@ class OracleDialect(DBDialect):
 
     @staticmethod
     def get_pending_query(batch_size: int) -> str:
-        """Returns Oracle specific query using FETCH FIRST and SKIP LOCKED."""
+        """Returns Oracle query using FETCH FIRST and SKIP LOCKED."""
         return (
             "SELECT id, task_name, payload FROM faktory_outbox "
-            "WHERE processed = 0 ORDER BY created_at ASC "
-            "FETCH FIRST %s ROWS ONLY FOR UPDATE SKIP LOCKED"
+            "WHERE processed = 0 AND is_failed = 0 "
+            "ORDER BY created_at ASC FETCH FIRST %s ROWS ONLY "
+            "FOR UPDATE SKIP LOCKED"
         )
 
     @staticmethod
@@ -119,222 +121,335 @@ class OracleDialect(DBDialect):
 
 
 class OutboxRelay:
-    """Independent engine to move jobs from DB outbox to Faktory server."""
+    """Independent engine to move jobs from DB outbox to Faktory."""
 
     def __init__(
         self,
         connection: ConnectionProtocol,
         dialect: DBDialect,
         faktory_url: str = "tcp://localhost:7419",
+        max_delivery_retries: int = 5,
     ):
-        """Initializes the relay with a raw DB connection and a dialect.
+        """Initializes the relay engine components.
 
         Args:
-            connection: A PEP 249 compliant database connection object.
-            dialect (DBDialect): The dialect strategy for SQL generation.
-            faktory_url: The connection URL for the Faktory server.
+            connection (ConnectionProtocol): A PEP 249 compliant
+                database connection instance.
+            dialect (DBDialect): The database dialect strategy.
+            faktory_url (str): Connection URL for the Faktory server.
+            max_delivery_retries (int): Maximum delivery attempts
+                before flagging a job as failed.
         """
-        self.conn = connection
+        self.db_connection = connection
         self.dialect = dialect
         self.faktory_url = faktory_url
+        self.max_delivery_retries = max_delivery_retries
 
-    def _sync_jobs_to_faktory(self, cursor: Any, jobs: List[Any]) -> None:
-        """Helper to push a list of jobs to Faktory and update their DB status.
+    def _unwrap_payload_arguments(self, cursor: Any, payload_data: dict) -> List[Any]:
+        """Extracts and formats runtime arguments for the worker.
 
         Args:
-            cursor: The current database cursor.
-            jobs: The list of job records fetched from the outbox.
+            cursor (Any): An active database cursor.
+            payload_data (dict): The unpacked JSON payload dictionary.
+
+        Returns:
+            List[Any]: A list containing a single element representing
+                the arguments array for the Faktory job.
         """
-        with faktory.connection(self.faktory_url) as client:
-            for jid, task, payload in jobs:
-                data = json.loads(payload) if isinstance(payload, str) else payload
+        extraction_mode = payload_data.get("mode", "custom")
 
-                client.queue(task, args=[data])
+        if extraction_mode in ("custom", "orm"):
+            return [payload_data.get("content", {})]
 
-                processed_val = self.dialect.get_bool_value(True)
-                cursor.execute(
-                    "UPDATE faktory_outbox SET processed = %s WHERE id = %s",
-                    [processed_val, jid],
-                )
+        if extraction_mode == "sql":
+            query_string = payload_data.get("query_string")
+            parameters = payload_data.get("parameters", [])
+
+            if not query_string:
+                return [{}]
+
+            cursor.execute(query_string, parameters)
+
+            columns = [col_desc[0] for col_desc in cursor.description]
+
+            query_results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return [query_results]
+
+        return [{}]
+
+    def _sync_jobs_to_faktory(self, cursor: Any, jobs: List[Any]) -> int:
+        """Pushes a lot of jobs to Faktory with error isolation.
+
+        Args:
+            cursor (Any): An active database cursor.
+            jobs (List[Any]): A collection of rows from the outbox.
+
+        Returns:
+            int: Total number of records successfully pushed.
+        """
+        successful_delivery_count = 0
+
+        with faktory.connection(self.faktory_url) as faktory_client:
+            for job_id, task_name, raw_payload in jobs:
+                try:
+                    payload_data = (
+                        json.loads(raw_payload)
+                        if isinstance(raw_payload, str)
+                        else raw_payload
+                    )
+                    task_arguments = self._unwrap_payload_arguments(cursor, payload_data)
+
+                    faktory_client.queue(task_name, args=task_arguments)
+
+                    processed_value = self.dialect.get_bool_value(True)
+                    cursor.execute(
+                        "UPDATE faktory_outbox SET processed = %s WHERE id = %s",
+                        [processed_value, job_id],
+                    )
+                    successful_delivery_count += 1
+
+                except Exception as execution_error:
+                    logger.error(
+                        "Failed to relay job ID %d: %s",
+                        job_id,
+                        str(execution_error),
+                    )
+                    error_traceback: str = "".join(
+                        traceback.format_exception(
+                            None,
+                            execution_error,
+                            execution_error.__traceback__,
+                        )
+                    )
+
+                    cursor.execute(
+                        "UPDATE faktory_outbox SET delivery_attempts "
+                        "= delivery_attempts + 1, "
+                        "last_execution_error = %s WHERE id = %s",
+                        [error_traceback, job_id],
+                    )
+
+                    true_value = self.dialect.get_bool_value(True)
+                    cursor.execute(
+                        "UPDATE faktory_outbox SET is_failed = %s "
+                        "WHERE id = %s AND delivery_attempts >= %s",
+                        [true_value, job_id, self.max_delivery_retries],
+                    )
+
+        return successful_delivery_count
 
     def process_batch(self, batch_size: int = 50) -> int:
-        """Fetches, pushes to Faktory, and marks jobs as processed.
-
-        This method handles its own transactions. In case of failure during
-        the Faktory push or SQL update, it performs a rollback.
+        """Fetches, pushes, and commits a chunk of outbox records.
 
         Args:
-            batch_size (int): Number of jobs to process in a single batch.
+            batch_size (int): Max number of jobs to fetch.
 
         Returns:
             int: The number of jobs successfully processed.
-
-        Raises:
-            Exception: Re-raises critical database or network exceptions
-                after rolling back the transaction.
         """
-        cursor = self.conn.cursor()
+        cursor = self.db_connection.cursor()
 
         try:
-            logger.debug("Scanning database for pending jobs ...")
-            query = self.dialect.get_pending_query(batch_size)
-            cursor.execute(query, (batch_size,))
-            jobs = cursor.fetchall()
+            pending_query = self.dialect.get_pending_query(batch_size)
+            cursor.execute(pending_query, (batch_size,))
+            jobs_chunk = cursor.fetchall()
 
-            if not jobs:
+            if not jobs_chunk:
                 return 0
 
-            job_ids = [j[0] for j in jobs]
-            min_id, max_id = min(job_ids), max(job_ids)
-
+            job_ids = [row[0] for row in jobs_chunk]
             logger.info(
-                "📦 Forwarding chunk: IDs %d to %d (%d jobs)", min_id, max_id, len(jobs)
+                "Processing batch of %d jobs (IDs: %s)",
+                len(jobs_chunk),
+                job_ids,
             )
 
-            self._sync_jobs_to_faktory(cursor, jobs)
+            processed_count = self._sync_jobs_to_faktory(cursor, jobs_chunk)
 
-            self.conn.commit()
-            return len(jobs)
+            self.db_connection.commit()
+            return processed_count
 
         except Exception:
-            self.conn.rollback()
+            self.db_connection.rollback()
             raise
         finally:
             cursor.close()
 
-    def run_loop(
-        self, min_sleep: float = 2.0, max_sleep: float = 60.0, batch_size: int = 50
-    ) -> None:
-        """Runs the relay loop with exponential backoff and critical alerting.
-
-        This loop continuously polls the database for new jobs. If jobs are found,
-        they are processed in chunks. If the database or Faktory is unavailable,
-        the relay increases its wait time exponentially until it reaches max_sleep.
+    def mask_url_password(self, connection_url: str) -> str:
+        """Removes the password from a connection URL for safe logging.
 
         Args:
-            min_sleep: Minimum seconds to wait when no jobs are found or after an error.
-            max_sleep: Maximum seconds to wait during exponential backoff.
-            batch_size: Maximum number of jobs to fetch and process in each iteration.
+            connection_url (str): The full connection string containing
+                credentials to be masked.
+
+        Returns:
+            str: The masked URL string with the password replaced by
+                asterisks, or '***' if parsing fails.
         """
-        backoff_delay = min_sleep
+        try:
+            if not isinstance(connection_url, str):
+                raise ValueError("URL must be a string sequence.")
+
+            parsed_url = urlparse.urlparse(connection_url)
+            if not parsed_url.password:
+                return connection_url
+
+            masked_netloc = f"{parsed_url.username}:****@{parsed_url.hostname}"
+            if parsed_url.port:
+                masked_netloc += f":{parsed_url.port}"
+
+            return parsed_url._replace(netloc=masked_netloc).geturl()
+        except Exception:
+            return "***"
+
+    def run_loop(
+        self,
+        min_sleep_seconds: float = 2.0,
+        max_sleep_seconds: float = 60.0,
+        batch_size: int = 50,
+    ) -> None:
+        """Runs the relay loop with exponential backoff and alerting.
+
+        This loop continuously polls the database for new pending jobs.
+        If jobs are found, they are processed in batches. If the
+        database or Faktory is unavailable, the relay increases its
+        wait time exponentially until it reaches max_sleep_seconds.
+
+        Args:
+            min_sleep_seconds (float): Minimum seconds to wait when no
+                jobs are found or after an execution error.
+            max_sleep_seconds (float): Maximum seconds to wait during
+                exponential backoff phases.
+            batch_size (int): Maximum number of jobs to fetch and
+                process in each individual iteration.
+        """
+        current_backoff_delay = min_sleep_seconds
 
         while True:
             try:
                 processed_count = self.process_batch(batch_size=batch_size)
 
+                # Reset the backoff delay immediately upon successful
+                # database transaction recovery.
+                current_backoff_delay = min_sleep_seconds
+
                 if processed_count > 0:
-                    backoff_delay = min_sleep
+                    # Give a micro-yield to the OS scheduler to avoid
+                    # 100% CPU thread starvation during heavy loads.
+                    time.sleep(0.01)
                     continue
 
-                time.sleep(min_sleep)
+                time.sleep(min_sleep_seconds)
 
-            except Exception as exc:
-                if backoff_delay >= max_sleep:
-                    logger.critical("Relay is stuck. Max backoff reached. Error: %s", exc)
+            except Exception as system_exception:
+                if current_backoff_delay >= max_sleep_seconds:
+                    logger.critical(
+                        "Relay is stuck. Max backoff reached. Error: %s",
+                        str(system_exception),
+                    )
                 else:
                     logger.error(
-                        "Relay error: %s. Retrying in %ds...", exc, backoff_delay
+                        "Relay error: %s. Retrying in %ds...",
+                        str(system_exception),
+                        int(current_backoff_delay),
                     )
 
-                time.sleep(backoff_delay)
-                backoff_delay = min(backoff_delay * 2, max_sleep)
-
-    def mask_url_password(self, url: str) -> str:
-        """Removes the password from a connection URL for safe logging.
-
-        Args:
-            url: The full connection string.
-
-        Returns:
-            The masked URL string or '***' on failure.
-        """
-        try:
-            if not isinstance(url, str):
-                raise ValueError("URL must be a string")
-
-            parsed = urlparse.urlparse(url)
-            if not parsed.password:
-                return url
-
-            netloc = f"{parsed.username}:****@{parsed.hostname}"
-            if parsed.port:
-                netloc += f":{parsed.port}"
-
-            return parsed._replace(netloc=netloc).geturl()
-        except Exception:
-            return "***"
+                time.sleep(current_backoff_delay)
+                current_backoff_delay = min(current_backoff_delay * 2, max_sleep_seconds)
 
 
-def main():
+def main() -> None:
     """Main entry point for the Outbox Relay CLI.
 
-    Initializes logging, establishes a connection to the database (PostgreSQL or Oracle)
-    based on environment variables, and starts the relay loop to synchronize
-    the database outbox with the Faktory server.
-
-    Environment Variables:
-        DATABASE_URL (str): The connection string for the database (Required).
-        FAKTORY_URL (str): The connection string for Faktory (Default: tcp://localhost:7419).
-        RELAY_DEBUG (bool): Enables debug logging if set to 'true'.
-        RELAY_BATCH_SIZE (int): Number of jobs to process per batch (Default: 50).
-
-    Raises:
-        SystemExit: If DATABASE_URL is missing, DB connection fails, or a critical
-            error occurs during execution.
+    Initializes logging, establishes a connection to the target
+    database engine based on configuration environment variables,
+    and starts the processing loop to synchronize rows.
     """
-    DEBUG_MODE = os.getenv("RELAY_DEBUG", "false").lower() == "true"
-    LOG_LEVEL = logging.DEBUG if DEBUG_MODE else logging.INFO
+    debug_mode = os.getenv("RELAY_DEBUG", "false").lower() == "true"
+    log_level = logging.DEBUG if debug_mode else logging.INFO
 
     logging.Formatter.converter = time.localtime
     logging.basicConfig(
-        level=LOG_LEVEL,
+        level=log_level,
         format="%(asctime)s │ %(levelname)-8s │ %(message)s",
         datefmt="%H:%M:%S",
     )
 
-    db_url = os.getenv("DATABASE_URL", "")
+    database_url = os.getenv("DATABASE_URL", "")
     faktory_url = os.getenv("FAKTORY_URL", "tcp://localhost:7419")
 
-    if not db_url:
+    if not database_url:
         logger.critical("DATABASE_URL is missing. Relay cannot start.")
         sys.exit(1)
 
-    is_postgres = "postgres" in db_url.lower()
-    dialect = PostgresDialect() if is_postgres else OracleDialect()
-    conn = None
+    db_url_lower = database_url.lower()
 
-    logger.info("📡 Relay starting (Mode: %s)", "DEBUG" if DEBUG_MODE else "PROD")
+    # Selection logic supporting all three declared dialects
+    if "postgres" in db_url_lower:
+        dialect = PostgresDialect()
+        connection_type = "postgres"
+    elif "sqlite" in db_url_lower or database_url.startswith("file:"):
+        dialect = SqliteDialect()
+        connection_type = "sqlite"
+    else:
+        dialect = OracleDialect()
+        connection_type = "oracle"
 
+    db_connection: Any = None
+
+    logger.info(
+        "📡 Relay starting (Mode: %s, Engine: %s)",
+        "DEBUG" if debug_mode else "PROD",
+        connection_type.upper(),
+    )
+
+    # Boot retry loop to handle slow-starting database containers
     for attempt in range(1, 11):
         try:
-            if is_postgres:
+            if connection_type == "postgres":
                 import psycopg2
-                from psycopg2.extensions import ISOLATION_LEVEL_READ_COMMITTED
+                from psycopg2.extensions import (
+                    ISOLATION_LEVEL_READ_COMMITTED,
+                )
 
-                conn = psycopg2.connect(db_url)
-                conn.set_isolation_level(ISOLATION_LEVEL_READ_COMMITTED)
+                db_connection = psycopg2.connect(database_url)
+                db_connection.set_isolation_level(ISOLATION_LEVEL_READ_COMMITTED)
+            elif connection_type == "sqlite":
+                import sqlite3
+
+                # sqlite3.connect cleans parameters from URL formats
+                clean_path = database_url.replace("sqlite:///", "")
+                db_connection = sqlite3.connect(clean_path)
             else:
                 import oracledb
 
-                conn = oracledb.connect(dsn=db_url)
+                db_connection = oracledb.connect(dsn=database_url)
 
             logger.info("🔌 Database connection established.")
             break
-        except Exception:
-            logger.warning("Database not ready (attempt %d/10). Retrying...", attempt)
+        except Exception as conn_error:
+            logger.warning(
+                "Database not ready (attempt %d/10): %s. Retrying...",
+                attempt,
+                str(conn_error),
+            )
             time.sleep(3)
 
-    if not conn:
+    if not db_connection:
         logger.critical("Could not connect to the database. Exiting.")
         sys.exit(1)
 
     try:
-        env_batch_size = int(os.getenv("RELAY_BATCH_SIZE", 50))
+        env_batch_size = int(os.getenv("RELAY_BATCH_SIZE", "50"))
     except ValueError:
         env_batch_size = 50
 
     try:
-        relay = OutboxRelay(connection=conn, dialect=dialect, faktory_url=faktory_url)
+        relay = OutboxRelay(
+            connection=db_connection,
+            dialect=dialect,
+            faktory_url=faktory_url,
+        )
         safe_faktory_url = relay.mask_url_password(faktory_url)
         logger.info(
             "🚀 Relay loop active (Batch size: %d, Server: %s)",
@@ -342,20 +457,23 @@ def main():
             safe_faktory_url,
         )
 
-        relay.run_loop(min_sleep=2.0, max_sleep=60.0, batch_size=env_batch_size)
+        relay.run_loop(
+            min_sleep_seconds=2.0,
+            max_sleep_seconds=60.0,
+            batch_size=env_batch_size,
+        )
 
     except KeyboardInterrupt:
         logger.info("")
         logger.info("🛑 Shutdown requested by user...")
     except SystemExit:
         raise
-    except Exception as exc:
-        logger.critical("❌ Relay engine crashed: %s", exc)
+    except Exception as runtime_error:
+        logger.critical("❌ Relay engine crashed: %s", runtime_error)
         sys.exit(1)
-        return
     finally:
-        if conn is not None:
-            conn.close()
+        if db_connection is not None:
+            db_connection.close()
             logger.info("🔌 Database connection closed.")
         logger.info("👋 Relay stopped gracefully. Goodbye!")
 
