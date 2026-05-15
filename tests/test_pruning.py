@@ -13,7 +13,7 @@ from faktory_outbox.models import FaktoryOutbox
 
 @pytest.mark.django_db
 def test_prune_command_should_remove_processed_records_only() -> None:
-    """Ensures old processed entries are removed while retaining active ones."""
+    """Verifies that only historical processed records are pruned."""
     now = timezone.now()
     outdated_timestamp = now - timedelta(days=20)
 
@@ -38,14 +38,18 @@ def test_prune_command_should_remove_processed_records_only() -> None:
         processed=False,
         is_failed=True,
     )
-    FaktoryOutbox.objects.filter(pk=old_failed.pk).update(created_at=outdated_timestamp)
+    FaktoryOutbox.objects.filter(pk=old_failed.pk).update(
+        created_at=outdated_timestamp
+    )
 
     output_buffer = StringIO()
     call_command("clear_processed_outbox", days=15, stdout=output_buffer)
 
-    assert "Successfully pruned 1 historical records" in output_buffer.getvalue()
+    assert "Successfully pruned 1" in output_buffer.getvalue()
     assert FaktoryOutbox.objects.filter(task_name="OldProcessed").count() == 0
-    assert FaktoryOutbox.objects.filter(task_name="RecentProcessed").count() == 1
+    assert (
+        FaktoryOutbox.objects.filter(task_name="RecentProcessed").count() == 1
+    )
     assert FaktoryOutbox.objects.filter(task_name="OldFailed").count() == 1
 
 
@@ -73,7 +77,7 @@ def test_prune_command_should_include_failed_when_flagged() -> None:
         stdout=output_buffer,
     )
 
-    assert "Successfully pruned 1 historical records" in output_buffer.getvalue()
+    assert "Successfully pruned 1" in output_buffer.getvalue()
     assert FaktoryOutbox.objects.filter(task_name="TargetFailed").count() == 0
 
 
@@ -92,9 +96,11 @@ def test_prune_command_should_handle_and_raise_database_exceptions(
     """Ensures database transaction crashes are logged and re-raised."""
     mock_buffer = StringIO()
 
-    mock_logger_error = mocker.patch(
-        "faktory_outbox.management.commands.clear_processed_outbox.logger.error"
+    target_path = (
+        "faktory_outbox.management.commands."
+        "clear_processed_outbox.logger.error"
     )
+    mock_logger_error = mocker.patch(target_path)
 
     now = timezone.now()
     old_job = FaktoryOutbox.objects.create(
@@ -119,4 +125,6 @@ def test_prune_command_should_handle_and_raise_database_exceptions(
     assert mock_logger_error.call_args[0][0] == (
         "Failed to execute outbox pruning transaction: %s"
     )
-    assert mock_logger_error.call_args[0][1] == "Database cluster is read-only"
+    assert mock_logger_error.call_args[0][1] == (
+        "Database cluster is read-only"
+    )

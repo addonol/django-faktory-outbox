@@ -1,13 +1,5 @@
 # WARNING: This configuration file is for DEVELOPMENT and DEMONSTRATION only.
-# Implements a 4-container production-like topology with generic nomenclature.
-#
-# SECURITY NOTES:
-# 1. Credentials should NEVER be exposed in environment variables in production.
-#    Use a secure Secrets Manager (like AWS Secrets Manager, HashiCorp Vault)
-#    or Docker/Podman Secrets.
-# 2. For professional deployments, use specialized automation tools like
-#    Ansible roles and playbooks to manage configurations and secrets securely.
-# 3. Ensure your production database and broker are isolated in a private network.
+# Implements a 4-container production-like topology.
 
 services:
   message_broker:
@@ -21,53 +13,78 @@ services:
     networks:
       - outbox_net
 
-  database:
-    image: docker.io/postgres:16-alpine
-    container_name: database
+  database_postgres:
+    image: docker.io/postgres:18-alpine
+    container_name: database_postgres
+    profiles:
+      - postgres
     environment:
       - POSTGRES_DB=${DB_NAME:-outbox_db}
       - POSTGRES_USER=${DB_USER:-user}
       - POSTGRES_PASSWORD=${DB_PASSWORD:-demo_password_123}
     ports:
       - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-user} -d ${DB_NAME:-outbox_db}"]
-      interval: 3s
-      timeout: 3s
-      retries: 5
+    networks:
+      - outbox_net
+
+  database_mariadb:
+    image: docker.io/mariadb:11.4
+    container_name: database_mariadb
+    profiles:
+      - mariadb
+    environment:
+      - MARIADB_DATABASE=${DB_NAME:-outbox_db}
+      - MARIADB_USER=${DB_USER:-user}
+      - MARIADB_PASSWORD=${DB_PASSWORD:-demo_password_123}
+      - MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=yes
+    ports:
+      - "3306:3306"
+    networks:
+      - outbox_net
+
+  database_mysql:
+    image: docker.io/mysql:9.7
+    container_name: database_mysql
+    profiles:
+      - mysql
+    environment:
+      - MYSQL_DATABASE=${DB_NAME:-outbox_db}
+      - MYSQL_USER=${DB_USER:-user}
+      - MYSQL_PASSWORD=${DB_PASSWORD:-demo_password_123}
+      - MYSQL_ROOT_PASSWORD=${DB_PASSWORD:-demo_password_123}
+      - MYSQL_ALLOW_EMPTY_PASSWORD=yes
+    ports:
+      - "3306:3306"
     networks:
       - outbox_net
 
   django_app:
     build:
-      context: .
+      context: ../
       dockerfile: Containerfile
     image: localhost/faktory-outbox-relay:latest
     container_name: django_application
-    depends_on:
-      - database
     environment:
-      - DATABASE_URL=postgres://${DB_USER:-user}:${DB_PASSWORD:-demo_password_123}@database:5432/${DB_NAME:-outbox_db}
+      - DATABASE_URL=${TARGET_DATABASE_URL}
     command: ["python", "-u", "examples/django_example/demo.py"]
     networks:
       - outbox_net
 
   relay:
     build:
-      context: .
+      context: ../
       dockerfile: Containerfile
     image: localhost/faktory-outbox-relay:latest
     container_name: relay_worker
     depends_on:
-      - database
       - message_broker
       - django_app
     environment:
-      - DATABASE_URL=postgres://${DB_USER:-user}:${DB_PASSWORD:-demo_password_123}@database:5432/${DB_NAME:-outbox_db}
+      - DATABASE_URL=${TARGET_DATABASE_URL}
       - FAKTORY_URL=tcp://:${FAKTORY_PASSWORD}@message_broker:7419
       - RELAY_DEBUG=${RELAY_DEBUG:-True}
       - RELAY_BATCH_SIZE=${RELAY_BATCH_SIZE:-50}
-    command: python -m faktory_outbox.relay
+    command: python -m faktory_outbox.main
     networks:
       - outbox_net
 

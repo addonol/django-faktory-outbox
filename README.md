@@ -140,14 +140,15 @@ For development, testing, and evaluation purposes, this repository includes a co
 
 2. Open the newly created .env file and customize your variables as needed.
 
+
     | Variable | Target Scope | Description |
     |----------|---------|-------------|
-    | DB_USER / DB_PASSWORD | Base Database | Credentials used to initialize the PostgreSQL service container. |
-    | DB_NAME | Base Database | The target schema name allocated on the PostgreSQL service. |
-    | FAKTORY_PASSWORD | Message Broker | BrokerPassword used to secure access to the Faktory broker network. |
+    | DB_USER / DB_PASSWORD | Base Database | Credentials used to initialize target database containers. |
+    | DB_NAME | Base Database | The target schema name allocated on the active database service. |
+    | DATABASE_URL | Core Application | Connection URI defining the dialect and target connection configurations. |
+    | FAKTORY_PASSWORD | Message Broker | BrokerPassword used to secure access to the Faktory network. |
     | RELAY_BATCH_SIZE | Relay Engine | Total row chunk limits parsed per database fetch operation (Default: 50). |
     | RELAY_DEBUG | Relay Engine | Toggles verbosity for daemon lifecycle, heartbeats, and connection logs. |
-
 
 
 ### 2. Development Command Hub
@@ -162,7 +163,13 @@ make help
 make dev-reset
 
 # Spin up PostgreSQL and Faktory containers in the background
-make infra-up
+make infra-up-postgres
+
+# Spin up MariaDB and Faktory containers in the background
+make infra-up-mariadb
+
+# Spin up MySQL and Faktory containers in the background
+make infra-up-mysql
 
 # Stop infrastructure containers and clear active volumes
 make infra-down
@@ -180,15 +187,32 @@ make logs
 
 ### 3. What Happens Under the Hood (Step-by-Step Execution)
 
-When you run the demonstration environment (make dev-reset), the 4-container stack choreographs the entire lifecycle automatically:
+When you run a demonstration environment (e.g., make infra-up-postgres), the
+stack choreographs the entire lifecycle automatically:
 
-1. **Infrastructure Initialization:** The database (PostgreSQL) and faktory server containers bootstrap and open their respective network ports.
-2. **Database Schema Preparation:** The django_application container starts, halts temporarily to await database readiness, and triggers the entrypoint.sh wrapper script. This script automatically runs the necessary Django SQL migrations to create the package tables.
-3. **Continuous Traffic Simulation:** Once initialized, the django_application enters an active loop, automatically creating a new test user and a companion outbox job every 5 seconds.
-4. **Asynchronous Relay Processing:** The relay_worker container boots independently, establishes a persistent handle against the same PostgreSQL database, locks incoming unprocessed rows, and flushes them down the pipeline to the faktory server broker.
+1. **Infrastructure Initialization:** The active database engine (Postgres,
+   MariaDB, or MySQL) and Faktory server containers bootstrap and open their
+   respective network ports.
+2. **Database Schema Preparation:** The django_application container starts,
+   halts temporarily to await database readiness via healthchecks, and triggers
+   the execution loop. This script automatically runs the necessary Django SQL
+   migrations to create the package tables dynamically on the target backend.
+3. **Continuous Traffic Simulation:** Once initialized, the django_application
+   enters an active loop, automatically creating a new test outbox job entries
+   with variable payload models every few seconds.
+4. **Asynchronous Relay Processing:** The relay_worker container boots
+   independently, establishes a persistent handle against the configured
+   database, locks incoming unprocessed rows using the dialect parameter styles
+   and native SKIP LOCKED clauses, and flushes them down the pipeline to the
+   Faktory broker.
 
 
 ### 4. Monitoring the Pipeline in Real Time
 
-*   **Watch the Relay Sync Stream:** Open a new terminal tab and run make relay. This tracks the relay_worker system logs, showing your job chunks being picked up and synchronized over the network continuously.
-*   **Check the Broker UI:** Open your preferred web browser and navigate to http://localhost:7420. This opens the official Faktory web dashboard, where you can watch the queues fill up and monitor the tasks arriving in real time.
+*   **Watch the Relay Sync Stream:** Open a new terminal tab and run make
+    relay. This tracks the relay_worker system logs, showing your job chunks
+    being picked up and synchronized over the network continuously.
+*   **Check the Broker UI:** Open your preferred web browser and navigate to
+    http://localhost:7420. This opens the official Faktory web dashboard, where
+    you can watch the queues fill up and monitor the tasks arriving in real
+    time.

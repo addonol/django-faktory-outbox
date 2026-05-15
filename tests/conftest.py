@@ -45,9 +45,11 @@ def pytest_configure() -> None:
 def mock_db_conn(mocker: Any) -> Any:
     """Provides a mocked database connection using mocker.
 
-    Uses mocker.Mock() to stay within the pytest ecosystem.
+    Uses mocker.MagicMock() to support context manager magic methods
+    automatically without breaking restrictions.
     """
-    conn = mocker.Mock(spec=["cursor", "commit", "rollback", "close"])
+    # Fix: Use MagicMock instead of Mock to support __enter__ and __exit__
+    conn = mocker.MagicMock()
     cursor = conn.cursor.return_value
     cursor.__enter__.return_value = cursor
     return conn

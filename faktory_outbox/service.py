@@ -5,7 +5,7 @@ background tasks atomically alongside core application database
 changes.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db.models import QuerySet
@@ -29,10 +29,10 @@ class OutboxService:
     @staticmethod
     def push_atomic(
         task_name: str,
-        queryset: Optional[QuerySet] = None,
+        queryset: Optional[QuerySet[Any]] = None,
         raw_sql: Optional[str] = None,
-        sql_parameters: Optional[List[Any]] = None,
-        custom_payload: Optional[Dict[str, Any]] = None,
+        sql_parameters: Optional[list[Any]] = None,
+        custom_payload: Optional[dict[str, Any]] = None,
         database_alias: str = DEFAULT_DB_ALIAS,
     ) -> FaktoryOutbox:
         """Registers a background task inside the active transaction.
@@ -50,9 +50,9 @@ class OutboxService:
                 preserve a low application memory footprint.
             raw_sql (str, optional): A raw SQL command string used
                 for high-performance complex database extractions.
-            sql_parameters (List[Any], optional): Parameters matching
+            sql_parameters (list[Any], optional): Parameters matching
                 positional placeholders within the `raw_sql` string.
-            custom_payload (Dict[str, Any], optional): A standard
+            custom_payload (dict[str, Any], optional): A standard
                 dictionary containing pre-computed variables.
             database_alias (str): The configuration routing alias
                 targeting a specific database engine.
@@ -73,15 +73,12 @@ class OutboxService:
                 f"database: '{database_alias}'."
             )
 
-        # Default fallback initialization using custom data mode
-        serialized_payload = {
+        serialized_payload: dict[str, Any] = {
             "mode": "custom",
             "content": custom_payload or {},
         }
 
         if queryset is not None:
-            # Memory optimization: streaming data chunks via cursors
-            # prevents loading the entire queryset into RAM.
             queryset_iterator = queryset.values().iterator(chunk_size=1000)
             serialized_payload.update(
                 {
@@ -98,6 +95,7 @@ class OutboxService:
                     "parameters": sql_parameters or [],
                 }
             )
+
         return FaktoryOutbox.objects.using(database_alias).create(
             task_name=task_name, payload=serialized_payload
         )

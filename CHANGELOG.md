@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [0.2.0] - 2026-05-15
+
+
+### Added
+- **MariaDB & MySQL Support:** Added a dedicated dialect class handling their
+  native concurrent locking syntax (`FOR UPDATE SKIP LOCKED`).
+- **Native Drivers:** Integrated the official compiled `mysqlclient` binary
+  driver inside the Containerfile to ensure stable production execution paths.
+- **Dependency Extras:** Exposed standard installation options for `mariadb`
+  and `mysql` packages within `pyproject.toml`.
+- **Dynamic Demonstration:** Upgraded `demo.py` to automatically detect the database
+  flavor from the `DATABASE_URL` with an active TCP port handshake check.
+- **Continuous Traffic Loop:** Enveloped the demo script in a continuous loop,
+  staging unique mock invoices every 3 seconds to act as a proper producer.
+- **Makefile Automation:** Introduced target CLI shortcuts (`make infra-up-postgres`,
+  `make infra-up-mariadb`, `make infra-up-mysql`) built around Podman capabilities.
+
+### Changed
+- **SOLID Refactoring:** Split the oversized monolithic `relay.py` script into
+  a clean package directory layout (`dialects.py`, `engine.py`, `main.py`, `services.py`).
+- **Lazy Initialization:** Leveraged a lazy loading proxy pattern inside
+  `__init__.py` to bypass early Django app registry startup circular deadlocks.
+- **Strict Linting Rules:** Configured Ruff and reformatted the codebase to
+  strictly enforce a maximum line length of 79 characters across the project.
+- **Makefile Cleanup:** Reorganized the `.PHONY` array directive block to reference
+  only valid and active orchestration commands.
+
+### Fixed
+- **Placeholder Syntax Bugs:** Fixed query execution crashes on SQLite and Oracle
+  by abstracting parameter formatting tokens into the dialect layout.
+- **Database Interlocks (Deadlocks):** Swapped query sorting logic to order by
+  primary key `id` instead of `created_at` to prevent InnoDB table-wide Gap Locks.
+- **Hanging Transaction Locks:** Relocated the connection `commit()` to trigger
+  immediately after fetching rows, dropping database locks before talking to Faktory.
+- **Postgres Payload Mapping:** Added seamless handling for situations where the
+  PostgreSQL driver natively returns a pre-parsed dictionary instead of raw text.
+- **Log Formatting Crash:** Fixed a critical python string formatting crash when
+  persisting daemon transaction error traces back into the database.
+- **Unit Testing Coverage:** Resolved context mock leaks and hidden connection
+  pools, securing a validated 100% codebase coverage threshold.
+
+
+
 ## [0.1.0] - 2026-05-14
 
 ### Added

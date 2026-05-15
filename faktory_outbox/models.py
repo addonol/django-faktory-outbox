@@ -24,8 +24,10 @@ class FaktoryOutbox(models.Model):
     # DateTime types stored from the OutboxService.
     payload = models.JSONField(encoder=DjangoJSONEncoder)
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    processed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+    processed = models.BooleanField(default=False, db_index=True)
 
     delivery_attempts = models.PositiveIntegerField(
         default=0,
