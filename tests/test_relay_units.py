@@ -72,13 +72,22 @@ def test_process_batch_should_manage_transactions_correctly(
 def test_sync_jobs_should_handle_serialized_payloads(
     mocker: Any,
 ) -> None:
-    """Ensures the relay decodes JSON strings during sync."""
+    """Ensures the relay decodes JSON strings during bulk sync."""
     mock_conn = mocker.Mock()
-    mocker.patch("faktory.connection")
-    relay = OutboxRelay(mock_conn, SqliteDialect())
 
+    mock_client = mocker.Mock()
+    mock_client.push_bulk.return_value = True
+    mocker.patch(
+        "faktory.connection",
+        return_value=mocker.MagicMock(__enter__=mocker.Mock(return_value=mock_client)),
+    )
+
+    relay = OutboxRelay(mock_conn, SqliteDialect())
     cursor = mocker.Mock()
+
     relay._sync_jobs_to_faktory(cursor, [(1, "worker_task", '{"status": "ok"}')])
+
+    assert mock_client.push_bulk.called
     assert cursor.execute.called
 
 
@@ -156,22 +165,21 @@ def test_unwrap_payload_arguments_empty_sql_or_unknown(
 def test_sync_jobs_to_faktory_unit_level_error_handling(
     mocker: Any,
 ) -> None:
-    """Ensures single task drops increment attempts and log errors."""
+    """Ensures a batch rejection by the broker propagates an exception."""
     mock_conn = mocker.Mock()
     mock_client = mocker.Mock()
-    mock_client.queue.side_effect = Exception("Network Reset")
 
-    mock_context = mocker.MagicMock()
-    mock_context.__enter__.return_value = mock_client
-    mocker.patch("faktory.connection", return_value=mock_context)
+    mock_client.push_bulk.return_value = False
+    mocker.patch(
+        "faktory.connection",
+        return_value=mocker.MagicMock(__enter__=mocker.Mock(return_value=mock_client)),
+    )
 
     relay = OutboxRelay(mock_conn, SqliteDialect(), max_delivery_retries=2)
     cursor = mocker.Mock()
 
-    success_count = relay._sync_jobs_to_faktory(cursor, [(99, "Task", "{}")])
-
-    assert success_count == 0
-    assert cursor.execute.called
+    with pytest.raises(Exception, match="Faktory server rejected"):
+        relay._sync_jobs_to_faktory(cursor, [(99, "Task", "{}")])
 
 
 def test_main_cli_fails_when_database_url_missing(mocker: Any) -> None:
@@ -261,24 +269,24 @@ def test_sync_jobs_to_faktory_should_log_error_traces_on_failure(
     """Ensures delivery failures trigger formatted error traceback logs."""
     mock_conn = mocker.Mock()
     mock_client = mocker.Mock()
-    mock_client.queue.side_effect = Exception("TCP Socket Timeout")
+    mock_client.push_bulk.return_value = True
 
-    mock_context = mocker.MagicMock()
-    mock_context.__enter__.return_value = mock_client
-    mocker.patch("faktory.connection", return_value=mock_context)
+    mocker.patch(
+        "faktory.connection",
+        return_value=mocker.MagicMock(__enter__=mocker.Mock(return_value=mock_client)),
+    )
 
     mock_logger_error = mocker.patch("faktory_outbox.relay.logger.error")
 
     relay = OutboxRelay(mock_conn, SqliteDialect())
     cursor = mocker.Mock()
 
-    relay._sync_jobs_to_faktory(cursor, [(1, "TaskName", "{}")])
+    relay._sync_jobs_to_faktory(cursor, [(1, "TaskName", "{")])
 
     assert mock_logger_error.called
-
-    assert mock_logger_error.call_args[0][0] == "Failed to relay job ID %d: %s"
-    assert mock_logger_error.call_args[0][1] == 1
-    assert "TCP Socket Timeout" in mock_logger_error.call_args[0][2]
+    assert mock_logger_error.call_args[0][0] == (
+        "Failed to process job ID %d before bulk sync: %s"
+    )
 
 
 def test_main_cli_graceful_cleanup_and_connection_close(

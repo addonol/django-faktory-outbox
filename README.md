@@ -6,41 +6,36 @@ This package ensures that background jobs are only delivered to Faktory if your 
 
 ## How it works
 
-When a user executes an action on your website (e.g., purchasing an item or signing up):
+When a user buys a product or signs up on your website:
 
-*   Your Django view opens a standard SQL transaction, writes to the business models, and inserts the task metadata into the faktory_outbox table using OutboxService.push_atomic().
-*   Because this operation writes exclusively to your local database, the query completes in milliseconds.
-*   The user receives their HTTP success response immediately. From the user's perspective, the application works perfectly.
+1. **The Fast Write (Local Database)**
+   * Your Django view opens a standard SQL transaction, saves your core business models (e.g., Invoices, Users), and simultaneously inserts a raw row into the `faktory_outbox` table via `OutboxService.push_atomic()`.
+   * Because this operation writes exclusively to your local database, the query finishes in a couple of milliseconds. Your user gets a success response instantly, keeping the UI snappy.
 
-*   The task records are stored securely in the outbox table, flagged with processed = False and is_failed = False.
-*   The relational database acts as a durable, persistent buffer. Staged jobs accumulate safely in the table. They cannot be lost or cleared, even if your web servers or container nodes restart unexpectedly.
+2. **The Safe Holding Buffer**
+   * The task sits safely in the outbox table flagged with `processed = False` and `is_failed = False`.
+   * Your relational database acts as a durable vault. Even if your web servers or container nodes restart right at this moment, no tasks are lost.
 
-*   The standalone OutboxRelay engine successfully queries the database for the next available chunk of jobs (since the DB is operational).
-*   It attempts to establish a connection over the network to the Faktory server, which fails (e.g., throwing a ConnectionRefusedError).
-*   The Relay instantly triggers a database rollback(): The fetched tasks remain locked inside the database and their states are preserved as unprocessed (processed = False). No data is corrupted, and no records are skipped.
-*   The loop catches the network exception and initiates the Exponential Backoff Strategy:
-    * It sleeps for a baseline period (e.g., 2 seconds) before retrying.
-    * If Faktory remains offline, the sleep interval doubles on each subsequent failure cycle (4s, 8s, 16s...) up to a hard ceiling (max_sleep_seconds = 60.0).
-    * This mechanism protects your system by preventing a dead connection loop from starving your CPU or flooding network interfaces.
+3. **The Bulk Dispatch**
+   * Completely separate from Django, the standalone `OutboxRelay` daemon sweeps the database table for pending records in the background.
+   * Instead of looping over rows and spamming Faktory with sequential 1-by-1 network requests, the relay bundles the entire batch in memory and fires it over a recycled TCP socket in a single network round-trip using the native `PUSHB` (Push Bulk) protocol command.
+   * If the network splits, the Relay triggers a database `rollback()` to keep records locked safely, then enters an Exponential Backoff loop (waiting 2s, 4s, 8s... up to 60s) so it doesn't burn your CPU or saturate network interfaces.
 
+## One Package, Two Roles
 
-## Core Components
+The package is installed all at once but splits into two distinct operational layers:
 
-The repository delivers two separate sub-systems:
-
-*   **The Capture Layer (OutboxService)**: The Python package you import directly into your Django application code. It provides an API to save task definitions alongside your standard models.
-
-*   **The Synchronization Layer (OutboxRelay)**: An independent background engine (run via a CLI command or as a non-root Docker/Podman container). It continuously sweeps the table using SKIP LOCKED queries, flushes messages to Faktory, and commits statuses atomically.
-
+*   **The Ingress Layer (`OutboxService`)**: The Python API you import directly into your Django application views or tasks to stage background jobs right alongside your models.
+*   **The Egress Layer (`OutboxRelay`)**: An independent background daemon (run via a CLI command or as an isolated, non-privileged container node). It continuously pulls the table queue and streams the batches over to Faktory.
 
 ## Key Features
 
-*   **Absolute Consistency**: Eliminates edge cases where a user receives a success confirmation while your database failed to save their order records.
-*   **Strict Network Isolation**: Protects your application threads from web-worker latency, broker connection drops, or broker downtime. Your HTTP views respond at full speed.
-*   **Horizontal Relay Scaling**: Native integration with database FOR UPDATE SKIP LOCKED clauses (PostgreSQL and Oracle). Multiple parallel relay instances run concurrently without ever overlapping or duplication risks.
-*   **Memory-Safe Extractions**: QuerySet extraction streams data chunks using database-level cursors (chunk_size=1000). You can buffer thousands of rows without triggering Out-Of-Memory (OOM) crashes.
-*   **Built-in Fault Isolation (DLQ)**: Granular try-except blocks isolate delivery failures line-by-line. Corrupted or un-serializable payloads automatically increment retry trackers and move to quarantine without blocking valid companion tasks.
-
+*   **Absolute Consistency**: Eliminates the classic edge case where a user receives a success confirmation email while your database failed to actually save their order records.
+*   **High-Throughput Bulk Batching**: Leverages native protocol `PUSHB` frames to ship entire arrays of jobs simultaneously, crushing network overhead and maximizing synchronization velocity.
+*   **Strict Network Isolation**: Web-worker threads never talk to the message broker during HTTP loops. Your website stays fast even if Faktory goes down completely.
+*   **Horizontal Relay Scaling**: Built from the ground up to utilize database `FOR UPDATE SKIP LOCKED` clauses (PostgreSQL and Oracle). Run multiple parallel relay instances concurrently without any overlapping or duplicate task risks.
+*   **Memory-Safe Processing**: Database query extractions stream data using low-level chunked cursors. Buffer thousands of lines without triggering Out-Of-Memory (OOM) crashes.
+*   **Granular Failure Isolation (DLQ)**: Try-except blocks catch failures line-by-line. Corrupted or un-serializable payloads automatically increment retry trackers and move to quarantine without blocking valid companion tasks inside the same bulk batch.
 
 
 
