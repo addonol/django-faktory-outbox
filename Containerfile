@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc6-dev \
     git \
+    pkg-config \
+    libmariadb-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
@@ -29,9 +31,9 @@ COPY pyproject.toml README.md ./
 COPY faktory_outbox/ ./faktory_outbox/
 COPY examples/django_example/ ./examples/django_example/
 
-RUN uv pip install --system ".[postgres,oracle]" && \
+RUN uv pip install --system ".[postgres,oracle,mariadb,mysql]" && \
     uv pip install --system -e . && \
-    uv pip install --system psycopg2-binary oracledb
+    uv pip install --system psycopg2-binary oracledb mysqlclient pymysql
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && chown appuser:appgroup /entrypoint.sh
@@ -42,4 +44,4 @@ USER appuser
 
 ENTRYPOINT ["/bin/bash", "/entrypoint.sh"]
 
-CMD ["python", "-m", "faktory_outbox.relay"]
+CMD ["python", "-m", "faktory_outbox.main"]

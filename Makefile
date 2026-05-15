@@ -2,10 +2,13 @@ include .env.example
 export
 
 # Dynamic URL Construction
-export DATABASE_URL=postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 export FAKTORY_URL=tcp://:$(FAKTORY_PASSWORD)@$(FAKTORY_HOST):7419
+COMPOSE_FILE = examples/docker-compose.yml
 
-.PHONY: help clean infra-up infra-down relay-restart logs dev-reset demo relay stress bulk-demo make-migrations run-example
+.PHONY: help clean \
+        infra-up-postgres infra-up-mariadb infra-up-mysql \
+        infra-down relay-restart logs dev-reset \
+        demo relay make-migrations run-example
 
 # ==============================================================================
 # HELP MENU (DEFAULT TARGET)
@@ -18,20 +21,22 @@ help:
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Development & Local Testing:"
-	@echo "  make make-migrations  Generate Django outbox package migrations isolated"
-	@echo "  make run-example      Execute the local memory-safe integration test"
-	@echo "  make clean            Remove build artifacts, caches, and pyc files"
+	@echo "  make make-migrations   Generate Django outbox migrations isolated"
+	@echo "  make run-example       Execute the local programmatic integration test"
+	@echo "  make clean             Remove build artifacts, caches, and pyc files"
 	@echo ""
-	@echo "Infrastructure Management (Podman):"
-	@echo "  make infra-up         Start the 4-container demonstration infrastructure"
-	@echo "  make infra-down       Stop and remove infrastructure containers & networks"
-	@echo "  make relay-restart    Rebuild the relay image and restart its container"
-	@echo "  make logs             Follow infrastructure containers logs stream"
-	@echo "  make dev-reset        Full reset (Clean cache, Stop stack, Rebuild & Start)"
+	@echo "Infrastructure Management (Podman/Docker Profiles):"
+	@echo "  make infra-up-postgres Launch stack with PostgreSQL active backend"
+	@echo "  make infra-up-mariadb  Launch stack with MariaDB active backend"
+	@echo "  make infra-up-mysql    Launch stack with MySQL active backend"
+	@echo "  make infra-down        Stop and remove all containers & networks"
+	@echo "  make relay-restart     Rebuild the relay image and restart service"
+	@echo "  make logs              Follow infrastructure containers logs stream"
+	@echo "  make dev-reset         Full reset (Clean cache, Stop, Rebuild & Start)"
 	@echo ""
 	@echo "Container Stream Monitoring:"
-	@echo "  make demo             Follow the live Django invoice generation loop logs"
-	@echo "  make relay            Follow the active outbox relay sync daemon logs"
+	@echo "  make demo              Follow the live Django app container logs"
+	@echo "  make relay             Follow the active outbox relay daemon logs"
 	@echo "========================================================================"
 
 
@@ -55,34 +60,54 @@ clean:
 # INFRASTRUCTURE MANAGEMENT TARGETS
 # ==============================================================================
 
-infra-up:
-	podman-compose up -d
+infra-up-postgres:
+	@echo "Launching infrastructure under PostgreSQL configuration..."
+	export TARGET_DATABASE_URL="postgres://user:demo_password_123@database_postgres:5432/outbox_db" && \
+	podman-compose -f $(COMPOSE_FILE) up -d \
+	message_broker database_postgres django_app relay
+
+infra-up-mariadb:
+	@echo "Launching infrastructure under MariaDB configuration..."
+	export TARGET_DATABASE_URL="mariadb://user:demo_password_123@database_mariadb:3306/outbox_db" && \
+	podman-compose -f $(COMPOSE_FILE) up -d \
+	message_broker database_mariadb django_app relay
+
+infra-up-mysql:
+	@echo "Launching infrastructure under MySQL configuration..."
+	export TARGET_DATABASE_URL="mysql://user:demo_password_123@database_mysql:3306/outbox_db" && \
+	podman-compose -f $(COMPOSE_FILE) up -d \
+	message_broker database_mysql django_app relay
 
 infra-down:
-	podman-compose down
+	@echo "Destroying full infrastructure environment stack..."
+	podman-compose -f $(COMPOSE_FILE) down
 
 relay-restart:
-	@echo "Rebuilding the local relay image..."
+	@echo "Rebuilding the local relay engine target container image..."
 	podman build -t localhost/faktory-outbox-relay:latest .
 	@echo "Restarting the relay service container..."
-	podman-compose up -d --build relay
+	podman-compose -f $(COMPOSE_FILE) up -d --build relay
 
 logs:
-	podman-compose logs -f
+	podman-compose -f $(COMPOSE_FILE) logs -f
 
-dev-reset: clean infra-down
+dev-reset: clean
+	@echo "Stopping all existing stacks and clearing volumes..."
+	podman-compose -f $(COMPOSE_FILE) down --volumes
 	@echo "Performing explicit local image build for Podman compliance..."
-	podman build -t localhost/faktory-outbox-relay:latest .
-	@echo "Launching full infrastructure stack..."
-	podman-compose up -d
+	podman build --no-cache -t localhost/faktory-outbox-relay:latest .
+	@echo "Launching default infrastructure stack (PostgreSQL)..."
+	export TARGET_DATABASE_URL="postgres://user:demo_password_123@database_postgres:5432/outbox_db" && \
+	podman-compose -f $(COMPOSE_FILE) up -d \
+	message_broker database_postgres django_app relay
+
 
 # ==============================================================================
-# EXECUTION & BENCHMARKING TARGETS
+# EXECUTION & MONITORING TARGETS
 # ==============================================================================
 
 demo:
-	uv run python examples/django_example/demo.py
+	podman logs -f django_application
 
 relay:
-	@echo "Launching outbox relay synchronization daemon..."
-	uv run python -m faktory_outbox.relay
+	podman logs -f relay_worker

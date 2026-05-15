@@ -1,159 +1,133 @@
-"""Demonstration script simulating an operational invoicing outbox workflow.
+"""Integration example and multi-DB smoke test for the Faktory Outbox.
 
-This standalone utility boots an isolated Django environment, ensures
-database schemas are initialized, and triggers atomic registration
-examples simulating transactional invoicing operations.
+This script parses a target DATABASE_URL from the runtime environment,
+configures the isolated Django engine routing, triggers continuous atomic
+outbox invoice registrations, and relies on the standalone daemon.
 """
 
 import logging
 import os
+import secrets
+import socket
 import sys
 import time
-from urllib.parse import urlparse
+import urllib.parse as urlparse
 
 import django
 from django.conf import settings
-from django.core.management import call_command
-from django.db import DEFAULT_DB_ALIAS, transaction
-from django.utils import timezone
+from django.db import transaction
 
-DATABASE_CONNECTION_URL = os.getenv(
-    "DATABASE_URL", "postgres://user:demo_password_123@database:5432/outbox_db"
-)
+logger = logging.getLogger("faktory_outbox.example")
 
-parsed_url = urlparse(DATABASE_CONNECTION_URL)
-database_port = parsed_url.port if parsed_url.port else 5432
-database_name = parsed_url.path.lstrip("/")
+database_url = os.getenv("DATABASE_URL", "sqlite:///:memory:")
+db_url_lower = database_url.lower()
+
+if "postgres" in db_url_lower:
+    target_engine = "django.db.backends.postgresql"
+elif "mariadb" in db_url_lower or "mysql" in db_url_lower:
+    target_engine = "django.db.backends.mysql"
+else:
+    target_engine = "django.db.backends.sqlite3"
+
+parsed_url = urlparse.urlparse(database_url)
+db_name = parsed_url.path.lstrip("/") if "sqlite" not in db_url_lower else ""
+
+if target_engine == "django.db.backends.sqlite3" and not db_name:
+    db_name = ":memory:"
+
+if "sqlite" not in db_url_lower:
+    target_host = parsed_url.hostname or "localhost"
+    default_port = 3306 if "postgres" not in db_url_lower else 5432
+    target_port = parsed_url.port or default_port
+
+    print(
+        f"⏳ Awaiting remote backend engine on {target_host}:{target_port}..."
+    )
+    for attempt in range(1, 31):
+        try:
+            with socket.create_connection(
+                (target_host, target_port), timeout=1
+            ):
+                print("🔌 Connection path available! Resuming setup.")
+                break
+        except (OSError, ConnectionRefusedError):
+            time.sleep(1)
+    else:
+        print("❌ Database engine network allocation timeout. Aborting.")
+        sys.exit(1)
 
 settings.configure(
     INSTALLED_APPS=[
         "django.contrib.contenttypes",
-        "django.contrib.admin",
-        "django.contrib.auth",
         "faktory_outbox",
     ],
     DATABASES={
         "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": database_name,
-            "USER": parsed_url.username,
-            "PASSWORD": parsed_url.password,
-            "HOST": parsed_url.hostname,
-            "PORT": str(database_port),
+            "ENGINE": target_engine,
+            "NAME": db_name,
+            "USER": urlparse.unquote(parsed_url.username or ""),
+            "PASSWORD": urlparse.unquote(parsed_url.password or ""),
+            "HOST": parsed_url.hostname or "localhost",
+            "PORT": str(parsed_url.port or ""),
         }
     },
     LOGGING={
         "version": 1,
         "disable_existing_loggers": False,
-        "handlers": {
-            "console": {
-                "class": "logging.StreamHandler",
-            },
-        },
-        "root": {
-            "handlers": ["console"],
-            "level": "INFO",
-        },
+        "handlers": {"console": {"class": "logging.StreamHandler"}},
+        "root": {"handlers": ["console"], "level": "INFO"},
     },
 )
-
 django.setup()
 
-logging.Formatter.converter = time.localtime
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s │ %(levelname)-8s │ %(message)s",
-    datefmt="%H:%M:%S",
-)
 
-logger = logging.getLogger("faktory_outbox.demo")
+def execute_integration_smoke_test() -> None:
+    """Executes a dynamic lifecycle simulation based on parameters.
 
-
-def run_production_demo_pipeline() -> None:
-    """Executes atomic outbox invoice job injection simulation patterns."""
-    if "--only-migrate" in sys.argv:
-        logger.info("Initializing package database schemas...")
-        call_command("migrate", verbosity=0)
-        logger.info("Schema migrations applied successfully.")
-        return
-
-    logger.info("Starting continuous invoice creation factory simulation...")
-
-    system_user, _ = User.objects.get_or_create(
-        username="system_invoice", defaults={"email": "system@example.com"}
-    )
-
-    try:
-        while True:
-            try:
-                with transaction.atomic(using=DEFAULT_DB_ALIAS):
-                    unique_timestamp = int(time.time() * 1000)
-                    dummy_content_type = ContentType.objects.get_for_model(ContentType)
-
-                    invoice_amount = unique_timestamp % 5000
-                    message_template = (
-                        f"Invoice generated for Amount: ${invoice_amount}.00"
-                    )
-
-                    mock_invoice: LogEntry = LogEntry.objects.create(
-                        action_time=timezone.now(),
-                        object_id=str(unique_timestamp),
-                        object_repr=f"INV-{unique_timestamp}",
-                        action_flag=1,
-                        change_message=message_template,
-                        content_type=dummy_content_type,
-                        user=system_user,
-                    )
-
-                    invoice_queryset = LogEntry.objects.filter(pk=mock_invoice.pk)
-                    OutboxService.push_atomic(
-                        task_name="ProcessGeneratedInvoice",
-                        queryset=invoice_queryset,
-                        database_alias=DEFAULT_DB_ALIAS,
-                    )
-
-                    customer_notification_parameters = {
-                        "invoice_reference": f"INV-{unique_timestamp}",
-                        "customer_email": f"client_{unique_timestamp}@env.com",
-                        "trigger_pdf_generation": True,
-                    }
-                    OutboxService.push_atomic(
-                        task_name="SendInvoiceEmailNotification",
-                        custom_payload=customer_notification_parameters,
-                        database_alias=DEFAULT_DB_ALIAS,
-                    )
-
-                    logger.info(
-                        "Buffered transactional invoice tasks for reference: %s",
-                        mock_invoice.object_repr,
-                    )
-
-                time.sleep(5.0)
-
-            except Exception as operational_error:
-                logger.error(
-                    "Invoicing simulation cycle failed: %s", str(operational_error)
-                )
-                time.sleep(5.0)
-
-    except KeyboardInterrupt:
-        logger.info("")
-        logger.info("🛑 Shutdown requested by user...")
-    finally:
-        from django.db import connections
-
-        if "default" in connections:
-            connections["default"].close()
-            logger.info("🔌 Database connection closed.")
-
-        logger.info("👋 Application stopped gracefully. Goodbye!")
-
-
-if __name__ == "__main__":
-    from django.contrib.admin.models import LogEntry
-    from django.contrib.auth.models import User
-    from django.contrib.contenttypes.models import ContentType
+    Creates database schemas via migrations and enters an infinite loop
+    staging unique invoice payloads every 3 seconds to feed the relay.
+    """
+    from django.core.management import call_command
 
     from faktory_outbox.service import OutboxService
 
-    run_production_demo_pipeline()
+    logger.info("🔧 Constructing database schema architecture...")
+    call_command("migrate", "faktory_outbox", verbosity=0)
+
+    logger.info("🚀 Starting continuous invoice background generation...")
+
+    invoice_counter = 1000
+
+    while True:
+        try:
+            invoice_counter += 1
+            secure_roll = secrets.randbelow(43450) + 1550
+            random_amount = round(secure_roll / 100.0, 2)
+
+            with transaction.atomic():
+                OutboxService.push_atomic(
+                    task_name="ProcessInvoicePayment",
+                    custom_payload={
+                        "invoice_id": invoice_counter,
+                        "customer_email": (
+                            f"client_{invoice_counter}@example.com"
+                        ),
+                        "amount": random_amount,
+                        "currency": "EUR",
+                        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
+                logger.info(
+                    "✅ Invoice #%d [Amount: %s EUR] securely staged.",
+                    invoice_counter,
+                    str(random_amount),
+                )
+            time.sleep(3)
+
+        except KeyboardInterrupt:
+            logger.info("🛑 Stopping background generator execution.")
+            break
+
+
+if __name__ == "__main__":
+    execute_integration_smoke_test()

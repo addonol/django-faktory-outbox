@@ -5,24 +5,25 @@ or quarantined failed records older than a retention threshold.
 """
 
 import logging
-import time
 from datetime import timedelta
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandParser
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from faktory_outbox.models import FaktoryOutbox
 
-logging.Formatter.converter = time.localtime
 logger = logging.getLogger("faktory_outbox.prune")
 
 
 class Command(BaseCommand):
     """Deletes historical logs from the outbox table to reclaim space."""
 
-    help = "Safely prunes processed or failed outbox records older than X days."
+    help = (
+        "Safely prunes processed or failed outbox records older than X days."
+    )
 
     def add_arguments(self, parser: CommandParser) -> None:
         """Defines runtime configuration flags for execution control."""
@@ -45,27 +46,25 @@ class Command(BaseCommand):
 
         limit_timestamp = timezone.now() - timedelta(days=retention_days)
 
-        prune_queryset = FaktoryOutbox.objects.filter(
-            processed=True,
-            created_at__lt=limit_timestamp,
-        )
+        prune_filter = Q(processed=True)
 
         if include_failed:
-            failed_queryset = FaktoryOutbox.objects.filter(
-                is_failed=True,
-                created_at__lt=limit_timestamp,
-            )
-            prune_queryset = prune_queryset | failed_queryset
+            prune_filter |= Q(is_failed=True)
 
-        total_records_found = prune_queryset.count()
-
-        if total_records_found == 0:
-            self.stdout.write("Outbox table is already clean. No records to prune.")
-            return
+        prune_queryset = FaktoryOutbox.objects.filter(
+            prune_filter,
+            created_at__lt=limit_timestamp,
+        )
 
         try:
             with transaction.atomic():
                 deleted_count, _ = prune_queryset.delete()
+
+            if deleted_count == 0:
+                self.stdout.write(
+                    "Outbox table is already clean. No records to prune."
+                )
+                return
 
             self.stdout.write(
                 f"Successfully pruned {deleted_count} historical records "
