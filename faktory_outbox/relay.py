@@ -1,8 +1,8 @@
-"""Relay engine to synchronize the database outbox with Faktory.
+"""Automated Transactional Outbox Relay Engine with Bulk Processing.
 
-This module provides the core processing loop and database dialect
-strategies required to fetch locked pending jobs and forward them
-reliably over TCP to a Faktory server.
+This daemon monitors the shared database outbox tables using low-overhead
+SKIP LOCKED queries and compresses active rows into single network frames via
+the native Faktory PUSHB protocol to eliminate network loops bottlenecks.
 """
 
 import json
@@ -178,7 +178,7 @@ class OutboxRelay:
         return [{}]
 
     def _sync_jobs_to_faktory(self, cursor: Any, jobs: List[Any]) -> int:
-        """Pushes a lot of jobs to Faktory with error isolation.
+        """Pushes a batch of jobs to Faktory using the fork's push_bulk API.
 
         Args:
             cursor (Any): An active database cursor.
@@ -187,7 +187,8 @@ class OutboxRelay:
         Returns:
             int: Total number of records successfully pushed.
         """
-        successful_delivery_count = 0
+        bulk_jobs: List[dict] = []
+        successful_ids: List[Any] = []
 
         with faktory.connection(self.faktory_url) as faktory_client:
             for job_id, task_name, raw_payload in jobs:
@@ -199,18 +200,22 @@ class OutboxRelay:
                     )
                     task_arguments = self._unwrap_payload_arguments(cursor, payload_data)
 
-                    faktory_client.queue(task_name, args=task_arguments)
-
-                    processed_value = self.dialect.get_bool_value(True)
-                    cursor.execute(
-                        "UPDATE faktory_outbox SET processed = %s WHERE id = %s",
-                        [processed_value, job_id],
+                    faktory_job = faktory_client._build_job_payload(
+                        task=task_name,
+                        args=task_arguments,
+                        queue="default",
+                        retry=2,
+                        priority=5,
+                        backtrace=0,
+                        custom={"outbox_id": job_id},
                     )
-                    successful_delivery_count += 1
+
+                    bulk_jobs.append(faktory_job)
+                    successful_ids.append(job_id)
 
                 except Exception as execution_error:
                     logger.error(
-                        "Failed to relay job ID %d: %s",
+                        "Failed to process job ID %d before bulk sync: %s",
                         job_id,
                         str(execution_error),
                     )
@@ -221,14 +226,12 @@ class OutboxRelay:
                             execution_error.__traceback__,
                         )
                     )
-
                     cursor.execute(
                         "UPDATE faktory_outbox SET delivery_attempts "
                         "= delivery_attempts + 1, "
                         "last_execution_error = %s WHERE id = %s",
                         [error_traceback, job_id],
                     )
-
                     true_value = self.dialect.get_bool_value(True)
                     cursor.execute(
                         "UPDATE faktory_outbox SET is_failed = %s "
@@ -236,7 +239,21 @@ class OutboxRelay:
                         [true_value, job_id, self.max_delivery_retries],
                     )
 
-        return successful_delivery_count
+            if not bulk_jobs:
+                return 0
+
+            success = faktory_client.push_bulk(bulk_jobs)
+            if not success:
+                raise Exception("Faktory server rejected the PUSHB payload.")
+
+        processed_value = self.dialect.get_bool_value(True)
+        for job_id in successful_ids:
+            cursor.execute(
+                "UPDATE faktory_outbox SET processed = %s WHERE id = %s",
+                [processed_value, job_id],
+            )
+
+        return len(successful_ids)
 
     def process_batch(self, batch_size: int = 50) -> int:
         """Fetches, pushes, and commits a chunk of outbox records.
@@ -403,7 +420,6 @@ def main() -> None:
         connection_type.upper(),
     )
 
-    # Boot retry loop to handle slow-starting database containers
     for attempt in range(1, 11):
         try:
             if connection_type == "postgres":
@@ -417,7 +433,6 @@ def main() -> None:
             elif connection_type == "sqlite":
                 import sqlite3
 
-                # sqlite3.connect cleans parameters from URL formats
                 clean_path = database_url.replace("sqlite:///", "")
                 db_connection = sqlite3.connect(clean_path)
             else:
