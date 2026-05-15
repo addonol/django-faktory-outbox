@@ -150,7 +150,8 @@ class OutboxRelay:
                 )
 
         if faktory_payloads:
-            logger.info("Connecting to %s", self.faktory_url)
+            safe_log_url = self.mask_url_password(self.faktory_url)
+            logger.info("Connecting to %s", safe_log_url)
             with faktory.connection(self.faktory_url) as client:
                 success = client.push_bulk(faktory_payloads)
                 if success is False:
