@@ -37,19 +37,24 @@ class Migration(migrations.Migration):
                     ),
                 ),
                 ("created_at", models.DateTimeField(auto_now_add=True)),
-                ("processed", models.BooleanField(db_index=True, default=False)),
+                (
+                    "processed",
+                    models.BooleanField(db_index=True, default=False),
+                ),
                 (
                     "delivery_attempts",
                     models.PositiveIntegerField(
                         default=0,
-                        help_text="The total number of delivery attempts to Faktory.",
+                        help_text="The total number of delivery attempts to "
+                        "Faktory.",
                     ),
                 ),
                 (
                     "last_execution_error",
                     models.TextField(
                         blank=True,
-                        help_text="The system exception trace log of the last failure.",
+                        help_text="The system exception trace log of the last "
+                        "failure.",
                         null=True,
                     ),
                 ),
@@ -57,7 +62,8 @@ class Migration(migrations.Migration):
                     "is_failed",
                     models.BooleanField(
                         default=False,
-                        help_text="Flagged as true if delivery attempts breach limits.",
+                        help_text="Flagged as true if delivery attempts "
+                        "breach limits.",
                     ),
                 ),
             ],
@@ -66,7 +72,9 @@ class Migration(migrations.Migration):
                 "ordering": ["created_at"],
                 "indexes": [
                     models.Index(
-                        condition=models.Q(("is_failed", False), ("processed", False)),
+                        condition=models.Q(
+                            ("is_failed", False), ("processed", False)
+                        ),
                         fields=["created_at"],
                         name="idx_outbox_pending_relay",
                     )
