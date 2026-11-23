@@ -54,12 +54,10 @@ with transaction.atomic():
 
     # 2. Register the associated task to the database buffer table
     OutboxService.push_atomic(
-        task_name="ProcessPayment",
-        custom_payload={"order_id": order.id}
+        task_name="ProcessPayment", custom_payload={"order_id": order.id}
     )
 
     # If the system crashes here, both database mutations roll back completely.
-
 ```
 
 ### 2. Supported Extraction Modes
@@ -73,17 +71,14 @@ from faktory_outbox.service import OutboxService
 # Best for pre-computed, small dictionaries or flat IDs.
 OutboxService.push_atomic(
     task_name="SendNotification",
-    custom_payload={"user_id": 42, "message": "Hello World"}
+    custom_payload={"user_id": 42, "message": "Hello World"},
 )
 
 # --- Mode B: Django QuerySet ---
 # Automatically extracts fields line-by-line using low-overhead cursors.
 # Natively converts complex primitives like UUID, Decimal, and DateTime.
 active_users = User.objects.filter(is_active=True)
-OutboxService.push_atomic(
-    task_name="SyncUsers",
-    queryset=active_users
-)
+OutboxService.push_atomic(task_name="SyncUsers", queryset=active_users)
 
 # --- Mode C: Just-In-Time Raw SQL Execution ---
 # Bypasses expensive data evaluation during the active HTTP request lifecycle.
@@ -91,9 +86,7 @@ OutboxService.push_atomic(
 raw_query = "SELECT id, email FROM auth_user WHERE date_joined > %s"
 query_params = ["2026-01-01"]
 OutboxService.push_atomic(
-    task_name="ExportAuditLog",
-    raw_sql=raw_query,
-    sql_parameters=query_params
+    task_name="ExportAuditLog", raw_sql=raw_query, sql_parameters=query_params
 )
 ```
 
